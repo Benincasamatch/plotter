@@ -1,4 +1,4 @@
-# 纸间 · Zhijian Plotter
+# 写字机 · xieziji
 
 浏览器编辑与预览，连接写字机的电脑运行本地 Python 服务。支持读取 `.gfont` 矢量笔画并生成 G-code，直接通过串口控制已验证的 GRBL 写字机。
 
@@ -20,8 +20,8 @@
 需要 Python **3.10+**。仓库包含原创的简单英文演示字体，可直接运行模拟模式：
 
 ```powershell
-git clone https://github.com/QScholar/zhijian-plotter.git
-cd zhijian-plotter
+git clone https://github.com/QScholar/xieziji.git
+cd xieziji
 .\start.ps1 -Simulate
 ```
 
