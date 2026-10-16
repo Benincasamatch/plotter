@@ -5,6 +5,11 @@ venv/
 .testdata/
 plotter/.testdata/
 plotter/jobs/
+backend/jobs/
+controller-jobs/
+controller/build/
+controller/.testdata/
+.controller-testdata/
 *.log
 *.pcap
 *.etl

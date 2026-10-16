@@ -1,1 +1,1 @@
-pyserial==3.5
+# Business backend uses only Python 3.10+ standard library.

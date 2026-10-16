@@ -8,16 +8,16 @@ import time
 import unittest
 import urllib.error
 import urllib.request
-from plotter.layout import generate
-from plotter.machine import Machine
-from plotter.server import Application, ROOT, create_server
+from backend.layout import generate
+from tests.legacy_machine import Machine, TestController
+from backend.server import Application, ROOT, create_server
 
 FONT_DIR = ROOT / 'tests' / 'fixtures'
 FONT = FONT_DIR / 'fixture.gfont'
 
 
 def test_temp():
-    base = (ROOT / 'plotter' / '.testdata').resolve()
+    base = (ROOT / 'tests' / '.testdata').resolve()
     base.mkdir(exist_ok=True)
     temp = tempfile.TemporaryDirectory(dir=base)
     if not pathlib.Path(temp.name).resolve().is_relative_to(base):
@@ -29,6 +29,7 @@ class FakeSerial:
     def __init__(self):
         self.received = []; self.replies = queue.Queue(); self.hold = False
         self.position = '0.000,0.000,0.000'; self.offset = '0.000,0.000,0.000'
+        self.g92 = '0.000,0.000,0.000'
         self.alarm = False; self.finished = False; self.drain = 0
     def write(self, raw):
         self.received.append(raw)
@@ -42,10 +43,11 @@ class FakeSerial:
             settings = {3:7,20:0,21:0,22:0,100:80,101:80,102:100,110:5000,111:5000,112:8000,130:300,131:300,132:300}
             lines = [f'${k}={v}' for k, v in settings.items()] + ['ok']
         elif raw == b'$G\n': lines = ['[GC:G1 G54 G17 G21 G90 G94 M5]', 'ok']
-        elif raw == b'$#\n': lines = ['[G54:'+self.offset+']','[G92:0.000,0.000,0.000]','[TLO:0.000]','ok']
+        elif raw == b'$#\n': lines = ['[G54:'+self.offset+']','[G92:'+self.g92+']','[TLO:0.000]','ok']
         elif raw == b'$N\n': lines = ['$N0=', '$N1=', 'ok']
         elif raw.startswith(b'G'):
             time.sleep(.003)
+            if raw == b'G92 X0 Y0\n': self.g92 = ','.join(self.position.split(',')[:2]) + ',0.000'
             if raw == b'G1 X0 Y0 F3000\n': self.finished = True
             lines = ['ALARM:1'] if self.alarm and b'Z10' in raw else ['ok']
         else: lines = ['ok']
@@ -85,10 +87,30 @@ class MachineTests(unittest.TestCase):
         if self.machine.active():
             self.machine.pause_event.set(); self.machine.worker.join(10)
         self.temp.cleanup()
-    def test_nonzero_origin_rejected_without_motion(self):
-        self.fake.position = '1.000,0.000,0.000'
+    def test_pen_not_up_rejected_without_motion(self):
+        self.fake.position = '1.000,2.000,10.000'
         with self.assertRaisesRegex(ValueError, '坐标'): self.machine.start('test',self.folder,self.result)
         self.assertFalse(any(raw.startswith(b'G') for raw in self.fake.received))
+    def test_current_physical_position_is_origin_for_repeated_jobs(self):
+        for position in ('10.000,4.000,0.000', '-20.000,35.000,0.000'):
+            self.fake.position = position
+            self.machine.start('new-origin', self.folder, self.result)
+            self.machine.worker.join(10)
+            self.assertEqual(self.machine.snapshot()['phase'], 'complete')
+            self.assertEqual(self.fake.position, position)
+            self.assertEqual(self.fake.g92, position)
+    def test_failure_to_return_to_new_origin_is_detected(self):
+        fake = self.fake
+        original = fake.write
+        def drift(raw):
+            original(raw)
+            if raw == b'G1 X0 Y0 F3000\n': fake.position = '11.000,4.000,0.000'
+        fake.write = drift
+        fake.position = '10.000,4.000,0.000'
+        self.machine.start('drift', self.folder, self.result)
+        self.machine.worker.join(10)
+        self.assertEqual(self.machine.snapshot()['phase'], 'failed')
+        self.assertIn('未返回原点', self.machine.snapshot()['error'])
     def test_coordinate_offset_rejected_without_motion(self):
         self.fake.offset = '0.000,0.000,2.000'
         with self.assertRaisesRegex(ValueError, '偏移'): self.machine.start('test',self.folder,self.result)
@@ -118,7 +140,7 @@ class HTTPTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp=test_temp()
-        cls.app=Application(FONT_DIR,cls.temp.name,True)
+        cls.app=Application(FONT_DIR,cls.temp.name,controller=TestController(True))
         cls.server=create_server(cls.app,port=0)
         cls.thread=threading.Thread(target=cls.server.serve_forever,daemon=True);cls.thread.start()
         cls.url=f'http://127.0.0.1:{cls.server.server_port}'
@@ -149,6 +171,18 @@ class HTTPTests(unittest.TestCase):
             self.assertEqual(failure.exception.code,403)
         with self.assertRaises(urllib.error.HTTPError):self.call('/api/preview',dict(font_id='../analysis',text='Hello'))
         with self.assertRaises(urllib.error.HTTPError):self.call('/../gfont.py')
+    def test_coordinate_preview_without_text_or_device(self):
+        settings=dict(reverse_y=True,swap_xy=True,origin='bottom-right')
+        guide=json.loads(self.call('/api/coordinate-preview',dict(coordinate_system=settings)))
+        self.assertEqual(guide['metadata']['machine_paper'],[297,210])
+        self.assertEqual(guide['metadata']['paper_origin'],[210,297])
+        self.assertIn('axis-guide',guide['svg'])
+        with self.assertRaises(urllib.error.HTTPError) as failure:
+            self.call('/api/coordinate-preview',dict(coordinate_system=dict(reverse_x='true')))
+        self.assertEqual(failure.exception.code,409)
+        with self.assertRaises(urllib.error.HTTPError) as failure:
+            self.call('/api/coordinate-preview',{}, {'Origin':'https://example.com'})
+        self.assertEqual(failure.exception.code,403)
     def test_wrong_method_and_malformed_input_rejected(self):
         with self.assertRaises(urllib.error.HTTPError):self.call('/api/start')
         with self.assertRaises(urllib.error.HTTPError):self.call('/api/preview',dict(font_id=self.font_id,text='Hello',size=None))

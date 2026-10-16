@@ -1,7 +1,7 @@
 import pathlib
 import struct
 import unittest
-from plotter.gfont import GFont, parse_glyph
+from backend.gfont import GFont, parse_glyph
 
 FIXTURE = pathlib.Path(__file__).parent / 'fixtures' / 'fixture.gfont'
 
