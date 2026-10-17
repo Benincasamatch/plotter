@@ -148,7 +148,7 @@ class ManualTests(unittest.TestCase):
                 reset = fake.received.index(b'\x18')
                 self.assertFalse(any(raw.startswith(b'G') for raw in fake.received[reset + 1:]))
                 with self.assertRaises(ValueError): machine.resume()
-                self.assertEqual(json.loads((folder / 'state.json').read_text())['phase'], 'stopped')
+                self.assertEqual(json.loads((folder / 'state.json').read_text(encoding='utf8'))['phase'], 'stopped')
 
     def test_manual_origin_adjustment_preserves_preview(self):
         app = Application(FONT_DIR, self.folder / 'jobs', controller=TestController(True))

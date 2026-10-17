@@ -158,7 +158,7 @@ class SplitIntegrationTests(unittest.TestCase):
         self.assertEqual((folder / 'job.gcode').read_bytes(), downloaded)
         self.assertEqual(hashlib.sha256(downloaded).hexdigest(), preview['metadata']['sha256'])
         def motion():
-            records = [json.loads(line) for line in (folder / 'serial.jsonl').read_text().splitlines()]
+            records = [json.loads(line) for line in (folder / 'serial.jsonl').read_text(encoding='utf8').splitlines()]
             return [bytes.fromhex(v['hex']).decode('ascii') for v in records if v['direction'] == 'tx' and bytes.fromhex(v['hex']).startswith(b'G')]
         self.assertEqual(''.join(motion()).encode(), downloaded)
         before = len(motion())
@@ -193,7 +193,7 @@ class SplitIntegrationTests(unittest.TestCase):
             folder=pathlib.Path(self.temp.name)/'device'/job_id
             expected=archive.read(f'page-{i+1:03d}.gcode')
             self.assertEqual((folder/'job.gcode').read_bytes(),expected)
-            records=[json.loads(line) for line in (folder/'serial.jsonl').read_text().splitlines()]
+            records=[json.loads(line) for line in (folder/'serial.jsonl').read_text(encoding='utf8').splitlines()]
             sent=b''.join(bytes.fromhex(v['hex']) for v in records if v['direction']=='tx' and bytes.fromhex(v['hex']).startswith(b'G'))
             self.assertEqual(sent,expected)
         with self.call('/api/disconnect',{}): pass

@@ -105,7 +105,7 @@ class HumanizationTests(unittest.TestCase):
             paper_points=[tuple(map(float,point.split(','))) for stroke in svg.findall('.//s:polyline',ns) for point in stroke.get('points').split()]
             self.assertEqual([coordinates.transform(*p) for p in paper_points],[p for stroke in cached['paths'] for p in stroke])
             self.assertEqual(hashlib.sha256(cached['gcode'].encode('ascii')).hexdigest(),preview['metadata']['sha256'])
-            self.assertEqual((folder/'job.gcode').read_text(),cached['gcode'])
+            self.assertEqual((folder/'job.gcode').read_text(encoding='ascii'),cached['gcode'])
             fake=FakeSerial();app.machine.serial=fake;app.machine.update(connected=True,phase='idle')
             app.api('/api/start',dict(job_id=preview['job_id'],origin_confirmed=True));app.machine.worker.join(10)
             self.assertEqual(app.machine.snapshot()['phase'],'complete')

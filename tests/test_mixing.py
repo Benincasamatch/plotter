@@ -110,7 +110,7 @@ class MixingTests(unittest.TestCase):
         preview = app.preview(data)
         folder, cached = app.job(preview['job_id'])
         self.assertEqual(hashlib.sha256(cached['gcode'].encode('ascii')).hexdigest(), preview['metadata']['sha256'])
-        self.assertEqual((folder / 'job.gcode').read_text(), cached['gcode'])
+        self.assertEqual((folder / 'job.gcode').read_text(encoding='ascii'), cached['gcode'])
         self.assertEqual(json.loads((folder / 'metadata.json').read_text(encoding='utf8'))['font_mix'], preview['metadata']['font_mix'])
         fake = FakeSerial()
         app.machine.serial = fake
