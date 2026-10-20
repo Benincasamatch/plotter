@@ -211,6 +211,8 @@ class Handler(BaseHTTPRequestHandler):
             files['/config.js'] = ('config.js', 'text/javascript')
             files['/notebook-sizing.js'] = ('notebook-sizing.js', 'text/javascript')
             files['/font-library.js'] = ('font-library.js', 'text/javascript')
+            files['/page-notifications.js'] = ('page-notifications.js', 'text/javascript')
+            files['/notification-worker.js'] = ('notification-worker.js', 'text/javascript')
             if not self.server.serve_frontend: raise KeyError(path)
             if path not in files: raise KeyError(path)
             name, kind = files[path]

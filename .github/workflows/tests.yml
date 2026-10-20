@@ -31,3 +31,9 @@ jobs:
               f.write('PLOTTER_CONTROLLER_BINARY=' + str(binary) + '\n')
       - run: python -m pip install -r requirements.txt
       - run: python -X warn_default_encoding -W error::EncodingWarning -m unittest discover -v
+      - name: Frontend state checks
+        run: |
+          node tests/test_live_speed.cjs
+          node tests/test_eta_ui.cjs
+          node tests/test_notebook_sizing.cjs
+          node tests/test_page_notifications.cjs

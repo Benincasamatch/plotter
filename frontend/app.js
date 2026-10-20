@@ -150,6 +150,7 @@ $('resetSpeed').onclick=()=>queueSpeed(100);
 function renderState(){
   renderSpeed();
   renderEta();
+  window.pageReminders?.observe(state,{device:deviceLabel(state.port),simulation:state.mode==='simulation'});
   if(observedMotionRevision!==null&&state.motion_revision!==undefined&&observedMotionRevision!==state.motion_revision){
     $('origin').checked=false;
     $('previewStatus').textContent='笔位置已调整，预览保留；请确认当前位置作为本次原点。';
@@ -627,7 +628,7 @@ $('authenticate').onclick=()=>action(load);
 $('connect').onclick=()=>action(async()=>{await saveDeviceProfile();state=await api('/api/connect',{port:profilePort});$('origin').checked=false;notice('机器已连接，已载入对应设备控制配置');});
 $('disconnect').onclick=()=>action(async()=>{state=await api('/api/disconnect',{});});
 $('check').onclick=()=>action(async()=>{state=await api('/api/check',{job_id:currentJob});notice('原点与机器配置检查通过');});
-$('start').onclick=()=>action(async()=>{const job=currentJob;state=await api('/api/start',{job_id:job,origin_confirmed:$('origin').checked});startedJobs.add(job);if(currentJob===job)currentJob=null;$('origin').checked=false;notice(state.mode==='simulation'?'模拟单页任务开始':'当前页写字任务开始；完成并换纸后再选择下一页');});
+$('start').onclick=()=>action(async()=>{const job=currentJob, page=documentResult?.pages.find(p=>p.job_id===job)?.metadata;state=await api('/api/start',{job_id:job,origin_confirmed:$('origin').checked});window.pageReminders?.remember(state,{device:deviceLabel(state.port),simulation:state.mode==='simulation',page:page?.page_number,pages:page?.page_count});startedJobs.add(job);if(currentJob===job)currentJob=null;$('origin').checked=false;notice(state.mode==='simulation'?'模拟单页任务开始':'当前页写字任务开始；完成并换纸后再选择下一页');});
 $('pause').onclick=()=>realtimeAction(async()=>{state=await api('/api/pause',{});});
 $('resume').onclick=()=>realtimeAction(async()=>{state=await api('/api/resume',{});});
 $('stop').onclick=()=>realtimeAction(async()=>{const returning=state.phase==='returning';state=await api('/api/stop',{});$('origin').checked=false;currentJob=null;notice(returning?'已请求停止回原点；请重新连接并确认位置':'已请求终止；停稳后先抬笔至 Z0，再返回本次 XY 原点');});
@@ -722,6 +723,7 @@ async function poll(){
   }
   finally{setTimeout(poll,800);}
 }
+window.pageReminders=new window.PageNotifications({hint:$('pageNotificationHint'),toggle:$('enablePageNotifications'),test:$('testPageNotification'),completion:$('pageCompletion')});
 renderSourcePages();renderOutputNavigation();
 restorePresets();
 try{const savedMode=localStorage.getItem('plotter.layout-mode.v1');if(['notebook','grid'].includes(savedMode))setMode(savedMode);}catch(error){/* First visit asks the user to select a mode. */}

@@ -70,3 +70,5 @@
 .font-dialog .font-gallery{grid-template-columns:repeat(2,minmax(0,1fr));max-height:none;overflow:visible}
 .font-dialog .font-recommendations{margin:24px 0 0}
 @media(max-width:600px){.font-dialog-header,.font-dialog-body{padding:16px}.font-dialog .font-gallery{grid-template-columns:minmax(0,1fr)}}
+
+.completion-reminders{margin:18px 0;padding:14px;border:1px solid #dce3d7;border-radius:10px;background:#f8faf4}.reminder-actions{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:10px}.completion-reminders .hint{margin-bottom:0}.page-completion{padding:12px;margin:12px 0 0;border-radius:8px;background:#e8f2df;color:#315b4e;line-height:1.7}
