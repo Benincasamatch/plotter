@@ -1,5 +1,7 @@
 #include "controller.hpp"
 #include "picosha2.h"
+#include <array>
+#include <cstdio>
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
@@ -13,6 +15,8 @@ struct Trace {
     std::mutex mutex;
     std::vector<std::string> sent;
     std::atomic<bool> alarm{false}, bad_config{false}, draining{false}, wrong_final{false};
+    std::array<double,3> work_offset{0,0,0};
+    double tool_offset=0, temporary_z=0;
     size_t count() { std::lock_guard<std::mutex> lock(mutex); return sent.size(); }
     bool contains(const std::string& value) { std::lock_guard<std::mutex> lock(mutex); return std::find(sent.begin(),sent.end(),value)!=sent.end(); }
 };
@@ -31,6 +35,15 @@ public:
     std::string read_line() override {
         if (pending_alarm) { pending_alarm=false; return "ALARM:1"; }
         auto line=delegate->read_line();
+        if (line.rfind("[G54:",0)==0) return "[G54:"+std::to_string(trace->work_offset[0])+","+std::to_string(trace->work_offset[1])+","+std::to_string(trace->work_offset[2])+"]";
+        if (line.rfind("[G92:",0)==0) {
+            double x=0,y=0,z=0;
+            expect(std::sscanf(line.c_str(),"[G92:%lf,%lf,%lf]",&x,&y,&z)==3,"Invalid simulated offset");
+            // The delegate stores the combined XY origin. GRBL reports G92
+            // relative to G54, so expose the individual offsets separately.
+            return "[G92:"+std::to_string(x-trace->work_offset[0])+","+std::to_string(y-trace->work_offset[1])+","+std::to_string(trace->temporary_z)+"]";
+        }
+        if (line.rfind("[TLO:",0)==0) return "[TLO:"+std::to_string(trace->tool_offset)+"]";
         if (trace->bad_config && line=="$3=7") return "$3=0";
         if (final && trace->draining && line.rfind("<Idle",0)==0) line.replace(1,4,"Run");
         if (final && trace->wrong_final && line.rfind("<Idle",0)==0) return "<Idle|MPos:12,0,0|FS:0,0>";
@@ -123,10 +136,35 @@ void immediate_controls_after_completion() {
         f.c->call("connect",{{"port","SIMULATOR"}});
     }
 }
+void work_coordinate_offsets() {
+    for (double sign : {1.,-1.}) {
+        Fixture f; f.trace->work_offset={13*sign,17*sign,0};
+        f.c->call("jog",{{"axis","X"},{"distance",1},{"feed",300}}); f.wait("idle");
+        f.c->call("jog",{{"axis","Y"},{"distance",-2},{"feed",300}}); f.wait("idle");
+        auto count=f.trace->count(); f.c->call("check",Json::object());
+        expect(f.trace->count()==count+5,"Read-only check sent unexpected commands");
+        for (int i=0;i<2;++i) {
+            f.id=std::string(31,'c')+char('0'+i);
+            f.stage(f.gcode()); f.start(); auto s=f.wait("complete");
+            expect(s["position"]==Json::array({1.,-2.,0.}),"Offset task did not return to its physical origin");
+        }
+    }
+    for (int kind=0;kind<3;++kind) {
+        Fixture f;
+        if (kind==0) f.trace->work_offset[2]=2;
+        if (kind==1) f.trace->tool_offset=1;
+        if (kind==2) f.trace->temporary_z=1;
+        f.stage(f.gcode()); rejects([&]{f.start();});
+        expect(!f.trace->contains("G21\n"),"Invalid Z/tool offset sent task commands");
+        expect(!fs::exists(f.path/f.id/"consumed"),"Rejected offset consumed the task");
+    }
+    { Fixture f; f.trace->work_offset={13,17,0}; f.trace->wrong_final=true;
+      f.stage(f.gcode()); f.start(); f.wait("failed"); }
+}
 }
 int main() {
     try {
-        upload_validation(); checksum_and_bounds(); pause_stop_and_lock(); alarm_and_configuration(); physical_idle_and_manual(); immediate_controls_after_completion();
+        upload_validation(); checksum_and_bounds(); pause_stop_and_lock(); alarm_and_configuration(); physical_idle_and_manual(); immediate_controls_after_completion(); work_coordinate_offsets();
         std::cout<<"PASS: upload/hash/bounds, replay/restart, pause/stop/locks, alarm/config/final position, physical Idle/manual/relative origin\n";
     } catch (const std::exception& e) { std::cerr<<"FAIL: "<<e.what()<<'\n'; return 1; }
 }

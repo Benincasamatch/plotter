@@ -165,7 +165,10 @@ Json Controller::check(const Json& metadata) {
     auto parameters = command("$#"); std::map<std::string,std::vector<double>> offsets;
     for (auto& line : parameters) { std::smatch m; if (std::regex_match(line,m,std::regex("\\[(G54|G92|TLO):([0-9.,-]+)\\]"))) offsets[m[1]] = values(m[2]); }
     require(offsets["G54"].size() == 3 && offsets["TLO"].size() == 1 && offsets["G92"].size() == 3, "Missing coordinate offsets");
-    for (auto key : {"G54","TLO"}) for (double value : offsets[key]) require(std::abs(value) <= .01, "Nonzero work/tool offset");
+    // G92 X0 Y0 establishes the task origin relative to the existing G54 XY
+    // offset. Keep that saved work origin; only Z/tool offsets affect pen height.
+    require(std::abs(offsets["G54"][2]) <= .01, "G54 Z offset must be zero");
+    require(std::abs(offsets["TLO"][0]) <= .01, "Tool length offset must be zero");
     require(std::abs(offsets["G92"][2]) <= .01, "Nonzero Z offset");
     auto replies = command("$$"); std::map<int,double> settings;
     for (auto& line : replies) { std::smatch m; if (std::regex_match(line,m,std::regex("\\$([0-9]+)=([0-9.]+)"))) settings[std::stoi(m[1])] = std::stod(m[2]); }
@@ -317,10 +320,12 @@ void Controller::run_job(fs::path folder) {
         require(file.eof(),"Cannot read task file");
         { std::lock_guard<std::mutex> tx(tx_mutex); cancelled(); if (!paused) update({{"phase","draining"}}); }
         wait_idle(true);
-        auto parameters=command("$#"); std::vector<double> offset;
-        for (auto& item : parameters) { std::smatch m; if (std::regex_match(item,m,std::regex("\\[G92:([0-9.,-]+)\\]"))) offset=values(m[1]); }
-        auto p=state()["position"]; require(offset.size()==3 && p.is_array() && std::abs(offset[2])<=.01,"Missing final origin coordinates");
-        for (size_t i=0;i<3;++i) require(std::abs(p[i].get<double>()-(i==2?0:offset[i]))<=.01,"Machine did not return to the task origin");
+        auto parameters=command("$#"); std::map<std::string,std::vector<double>> offsets;
+        for (auto& item : parameters) { std::smatch m; if (std::regex_match(item,m,std::regex("\\[(G54|G92|TLO):([0-9.,-]+)\\]"))) offsets[m[1]]=values(m[2]); }
+        auto p=state()["position"];
+        require(offsets["G54"].size()==3 && offsets["G92"].size()==3 && offsets["TLO"].size()==1 && p.is_array(),"Missing final origin coordinates");
+        require(std::abs(offsets["G54"][2])<=.01 && std::abs(offsets["G92"][2])<=.01 && std::abs(offsets["TLO"][0])<=.01,"Unexpected final Z/tool offset");
+        for (size_t i=0;i<3;++i) require(std::abs(p[i].get<double>()-(i==2?0:offsets["G54"][i]+offsets["G92"][i]))<=.01,"Machine did not return to the task origin");
         { std::lock_guard<std::mutex> tx(tx_mutex); cancelled(); update({{"phase","complete"},{"operation_type",nullptr}}); }
     } catch (const Cancelled&) {} catch (const std::exception& e) { if (!stopped) failure(e.what(),false); }
     if (stopped) {
