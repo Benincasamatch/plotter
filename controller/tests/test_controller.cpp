@@ -17,6 +17,9 @@ struct Trace {
     std::atomic<bool> alarm{false}, bad_config{false}, draining{false}, wrong_final{false};
     std::array<double,3> work_offset{0,0,0};
     double tool_offset=0, temporary_z=0;
+    std::atomic<bool> hold_alarm{false}, reset_alarm{false}, reset_moved{false}, return_z_wrong{false}, return_wait{false};
+    std::atomic<bool> reset_seen{false}, hold_complete{false}, return_z_seen{false}, return_xy_seen{false};
+    int hold_deceleration=0;
     size_t count() { std::lock_guard<std::mutex> lock(mutex); return sent.size(); }
     bool contains(const std::string& value) { std::lock_guard<std::mutex> lock(mutex); return std::find(sent.begin(),sent.end(),value)!=sent.end(); }
 };
@@ -28,6 +31,9 @@ public:
     explicit Fake(std::shared_ptr<Trace> t):trace(std::move(t)){}
     void write(const std::string& raw) override {
         { std::lock_guard<std::mutex> lock(trace->mutex); trace->sent.push_back(raw); }
+        if (raw=="\x18") { expect(trace->hold_complete,"Reset before physical hold completed"); trace->reset_seen=true; final=false; }
+        if (trace->reset_seen && raw=="$J=G21 G90 G53 Z0 F600\n") trace->return_z_seen=true;
+        if (trace->reset_seen && raw.rfind("$J=G21 G90 G53 X",0)==0) trace->return_xy_seen=true;
         if (trace->alarm && raw=="G1 Z10 F3000\n") { pending_alarm=true; return; }
         if (raw=="G1 X0 Y0 F3000\n") final=true;
         delegate->write(raw);
@@ -35,6 +41,15 @@ public:
     std::string read_line() override {
         if (pending_alarm) { pending_alarm=false; return "ALARM:1"; }
         auto line=delegate->read_line();
+        if (trace->reset_seen && trace->reset_alarm && line.rfind("Grbl ",0)==0) return "ALARM:1";
+        if (line.rfind("<Hold:0|",0)==0) {
+            if (trace->hold_alarm) return "ALARM:1";
+            if (trace->hold_deceleration>0) { --trace->hold_deceleration; line.replace(1,6,"Hold:1"); }
+            else trace->hold_complete=true;
+        }
+        if (trace->reset_seen && trace->reset_moved && line.rfind("<Idle|",0)==0) return "<Idle|MPos:99,99,0|FS:0,0>";
+        if (trace->return_z_seen && trace->return_z_wrong && line.rfind("<Idle|",0)==0) return "<Idle|MPos:1,2,5|FS:0,0>";
+        if (trace->return_xy_seen && trace->return_wait && line.rfind("<Idle|",0)==0) line.replace(1,4,"Run");
         if (line.rfind("[G54:",0)==0) return "[G54:"+std::to_string(trace->work_offset[0])+","+std::to_string(trace->work_offset[1])+","+std::to_string(trace->work_offset[2])+"]";
         if (line.rfind("[G92:",0)==0) {
             double x=0,y=0,z=0;
@@ -104,8 +119,57 @@ void pause_stop_and_lock() {
     f.c->call("pause",Json::object()); std::this_thread::sleep_for(30ms); auto ack=f.c->state()["acknowledged"];
     std::this_thread::sleep_for(80ms); expect(f.c->state()["acknowledged"]==ack,"Task advanced while paused");
     f.c->call("resume",Json::object()); f.c->call("stop",Json::object()); f.wait("stopped");
-    expect(f.trace->contains("!\x18"),"Stop did not send reset");
+    expect(f.trace->contains("!") && f.trace->contains("\x18"),"Stop did not hold then reset");
     rejects([&]{f.c->call("resume",Json::object());}); f.start(); expect(f.c->state()["phase"]=="stopped","Stopped task replayed");
+}
+void stop_returns_xyz() {
+    for (bool paused : {false,true}) {
+        Fixture f; f.trace->work_offset={13,17,0}; f.trace->hold_deceleration=3;
+        f.c->call("jog",{{"axis","X"},{"distance",14},{"feed",300}}); f.wait("idle");
+        f.c->call("jog",{{"axis","Y"},{"distance",-16},{"feed",300}}); f.wait("idle");
+        f.stage(f.gcode(500)); f.start();
+        auto deadline=std::chrono::steady_clock::now()+3s;
+        while (f.c->state()["acknowledged"].get<int>()<6 && std::chrono::steady_clock::now()<deadline) std::this_thread::sleep_for(2ms);
+        if (paused) f.c->call("pause",Json::object());
+        f.c->call("stop",Json::object()); f.c->call("stop",Json::object());
+        auto s=f.wait("stopped");
+        expect(s["position"]==Json::array({14.,-16.,0.}) && s["connected"]==true && s["returned_to_origin"]==true,"Stop did not return XYZ and retain connection");
+        expect(s["acknowledged"].get<int>()<s["total"].get<int>(),"Stop completed the remaining task");
+        std::vector<std::string> sent; { std::lock_guard<std::mutex> lock(f.trace->mutex); sent=f.trace->sent; }
+        auto hold=std::find(sent.begin(),sent.end(),"!");
+        auto reset=std::find(hold,sent.end(),"\x18");
+        auto z=std::find(reset,sent.end(),"$J=G21 G90 G53 Z0 F600\n");
+        auto xy=std::find(z,sent.end(),"$J=G21 G90 G53 X14.000 Y-16.000 F1000\n");
+        expect(hold<reset && reset<z && z<xy && xy!=sent.end(),"Stop recovery order is incorrect");
+        expect(std::none_of(hold,sent.end(),[](const auto& raw){return raw.rfind("G1 ",0)==0;}),"Original path sent after stop");
+        expect(std::count(sent.begin(),sent.end(),"\x18")==1,"Duplicate stop reset recovery twice");
+        f.c->call("check",Json::object());
+        f.c->call("disconnect",Json::object());
+    }
+    for (int fault=0;fault<4;++fault) {
+        Fixture f; f.stage(f.gcode(500)); f.start();
+        if (fault==0) f.trace->reset_alarm=true;
+        if (fault==1) f.trace->reset_moved=true;
+        if (fault==2) f.trace->return_z_wrong=true;
+        if (fault==3) f.trace->hold_alarm=true;
+        f.c->call("stop",Json::object()); f.wait("failed");
+        expect(!f.trace->return_xy_seen,"Unsafe XY return sent after recovery failure");
+        if (fault<2) expect(!f.trace->return_z_seen,"Motion sent after invalid reset");
+        if (fault==3) expect(!f.trace->reset_seen && !f.trace->return_z_seen,"Recovery reset or moved after a hold alarm");
+        expect(!f.trace->contains("$X\n"),"Recovery automatically unlocked an alarm");
+    }
+    { Fixture f; f.trace->return_wait=true; f.stage(f.gcode(500)); f.start(); f.c->call("stop",Json::object());
+      f.wait("returning"); std::this_thread::sleep_for(50ms);
+      expect(f.c->state()["phase"]=="returning","Stop completed before physical return");
+      f.trace->return_wait=false; auto s=f.wait("stopped");
+      expect(s["returned_to_origin"]==true && s["position"]==Json::array({0.,0.,0.}),"Stop did not wait for the actual return"); }
+    { Fixture f; f.trace->return_wait=true; f.stage(f.gcode(500)); f.start(); f.c->call("stop",Json::object());
+      f.wait("returning"); std::this_thread::sleep_for(50ms);
+      expect(f.c->state()["phase"]=="returning","Stop completed before physical return");
+      rejects([&]{f.c->call("jog",{{"axis","X"},{"distance",1},{"feed",300}});});
+      f.c->call("stop",Json::object()); auto s=f.wait("stopped");
+      expect(s["returned_to_origin"]==false && s["connected"]==false,"Cancelling return reported a successful origin return");
+      expect(f.trace->contains("\x85"),"Cancelling return did not cancel the jog"); }
 }
 void alarm_and_configuration() {
     { Fixture f; f.trace->alarm=true; f.stage(f.gcode()); f.start(); f.wait("failed"); expect(f.trace->contains("!"),"Alarm did not request hold"); expect(!f.trace->contains("G1 X1.000 Y2.000 F1800\n"),"Motion sent after alarm"); }
@@ -164,7 +228,7 @@ void work_coordinate_offsets() {
 }
 int main() {
     try {
-        upload_validation(); checksum_and_bounds(); pause_stop_and_lock(); alarm_and_configuration(); physical_idle_and_manual(); immediate_controls_after_completion(); work_coordinate_offsets();
+        upload_validation(); checksum_and_bounds(); pause_stop_and_lock(); alarm_and_configuration(); physical_idle_and_manual(); immediate_controls_after_completion(); work_coordinate_offsets(); stop_returns_xyz();
         std::cout<<"PASS: upload/hash/bounds, replay/restart, pause/stop/locks, alarm/config/final position, physical Idle/manual/relative origin\n";
     } catch (const std::exception& e) { std::cerr<<"FAIL: "<<e.what()<<'\n'; return 1; }
 }

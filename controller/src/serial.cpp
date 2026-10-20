@@ -125,7 +125,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex);
         if (raw == "!") { hold = true; return; }
         if (raw == "~") { hold = false; return; }
-        if (raw == "\x18" || raw == "\x85") { hold = false; return; }
+        if (raw == "\x18") { hold = false; replies={}; offset[0]=offset[1]=offset[2]=0; replies.push("Grbl 1.3a.20221114 ['$' for help]"); return; }
+        if (raw == "\x85") { hold = false; return; }
         if (raw == "?") { replies.push("<" + std::string(hold ? "Hold:0" : "Idle") + "|MPos:" + xyz(position) + "|FS:0,0>"); return; }
         if (raw == "$I\n") replies.push("[VER:1.3a.20221114:simulation]");
         else if (raw == "$G\n") replies.push("[GC:G1 G54 G17 G21 G90 G94 M5]");

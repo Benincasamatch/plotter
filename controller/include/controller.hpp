@@ -29,7 +29,7 @@ private:
     std::unique_ptr<Serial> serial;
     std::mutex api_mutex, state_mutex, tx_mutex, log_mutex, jobs_mutex;
     std::thread worker;
-    std::atomic<bool> busy{false}, stopped{false}, paused{false}, manual_cancel{false};
+    std::atomic<bool> busy{false}, stopped{false}, stop_requested{false}, paused{false}, manual_cancel{false};
     Json current;
     std::ofstream log;
     std::chrono::steady_clock::time_point last_poll{};
@@ -40,9 +40,10 @@ private:
     std::string read();
     std::string status();
     std::vector<std::string> command(const std::string& line, bool running = false, bool manual = false);
-    Json check(const Json& metadata);
+    Json check(const Json& metadata, bool pen_up = true);
     void wait_idle(bool writing);
-    void run_job(fs::path folder);
+    void run_job(fs::path folder, Json origin);
+    void return_after_stop(const fs::path& folder, const Json& origin);
     void run_manual(std::vector<std::string> steps);
     void failure(const std::string& message, bool manual);
     void save(const fs::path& folder);

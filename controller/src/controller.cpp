@@ -2,6 +2,8 @@
 #include "picosha2.h"
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
+#include <locale>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
@@ -99,7 +101,7 @@ Json Controller::ports() {
     }
     return {{"ports",result}};
 }
-void Controller::cancelled() { if (stopped) throw Cancelled{}; }
+void Controller::cancelled() { if (stopped || stop_requested) throw Cancelled{}; }
 void Controller::record(const char* direction, const std::string& raw) {
     std::lock_guard<std::mutex> lock(log_mutex);
     if (log.is_open()) {
@@ -157,9 +159,10 @@ std::vector<std::string> Controller::command(const std::string& line, bool runni
         if (now > deadline) throw SerialError("Command acknowledgement timeout");
     }
 }
-Json Controller::check(const Json& metadata) {
+Json Controller::check(const Json& metadata, bool pen_up) {
     auto report = status(); require(starts(report, "<Idle"), "Machine must be Idle");
-    auto p = state()["position"]; require(p.is_array() && p.size() == 3 && std::abs(p[2].get<double>()) <= .01, "Raise pen to Z0 first");
+    auto p = state()["position"]; require(p.is_array() && p.size() == 3, "Missing machine position");
+    require(pen_up ? std::abs(p[2].get<double>())<=.01 : p[2].get<double>()>=-.01 && p[2].get<double>()<=10.01, "Raise pen to Z0 first");
     auto modal = command("$G");
     require(std::any_of(modal.begin(), modal.end(), [](const auto& s){return std::regex_search(s, std::regex("\\bG54\\b"));}), "Expected G54 work coordinates");
     auto parameters = command("$#"); std::map<std::string,std::vector<double>> offsets;
@@ -182,7 +185,7 @@ Json Controller::check(const Json& metadata) {
     auto startup = command("$N");
     require(std::find(startup.begin(),startup.end(),"$N0=") != startup.end() && std::find(startup.begin(),startup.end(),"$N1=") != startup.end(), "Missing startup configuration");
     for (auto& line : startup) require(line == "$N0=" || line == "$N1=" || line == "ok", "Unverified startup command");
-    return {{"status",report},{"settings",replies},{"modal",modal},{"parameters",parameters},{"startup",startup}};
+    return {{"status",report},{"position",p},{"settings",replies},{"modal",modal},{"parameters",parameters},{"startup",startup}};
 }
 void Controller::wait_idle(bool writing) {
     auto deadline = Clock::now() + (writing ? 90s : 35s);
@@ -200,7 +203,7 @@ void Controller::join_finished() {
         // Terminal motion state can be visible while the worker still saves
         // its final file and closes the log. Join that cleanup before allowing
         // the next operation; running/paused/draining work still rejects it.
-        require(snapshot["phase"]=="complete" || snapshot["phase"]=="idle", "Another operation is active");
+        require(snapshot["phase"]=="complete" || snapshot["phase"]=="idle" || snapshot["phase"]=="stopped", "Another operation is active");
     }
     if (worker.joinable()) worker.join();
 }
@@ -209,7 +212,7 @@ Json Controller::call(const std::string& action, const Json& data) {
     // These commands never wait for serial queries or uploads.
     if (action == "stop" || action == "pause" || action == "resume" || action == "manual-pause" || action == "manual-stop") {
         std::lock_guard<std::mutex> lock(tx_mutex); auto s = state();
-        if (action == "stop" && s["phase"] == "stopping") return s;
+        if (action == "stop" && (s["phase"] == "stopping" || s["phase"] == "stopped")) return s;
         require(busy, "No operation is active");
         if (starts(action,"manual-")) {
             require(s["operation_type"] == "manual", "No manual operation is active"); manual_cancel = true;
@@ -219,9 +222,18 @@ Json Controller::call(const std::string& action, const Json& data) {
             require(s["operation_type"] == "writing", "No writing task is active");
             require(s["phase"] != "stopping" && s["phase"] != "checking", "Task cannot be controlled in this phase");
             if (action == "stop") {
-                stopped = true; paused = false;
+                // A second stop during the return cancels that jog instead of
+                // restarting recovery. Repeated requests while stopping are inert.
+                if (s["phase"] == "returning") {
+                    stopped=true; paused=false;
+                    update({{"phase","stopping"},{"last_action","Return to origin cancelled"}});
+                    try { record("tx","\x85"); serial->write("\x85"); } catch (const std::exception& e) { update({{"error",e.what()}}); }
+                    return state();
+                }
+                stop_requested = true; paused = false;
                 update({{"phase","stopping"},{"motion_revision",s["motion_revision"].get<int>()+1}});
-                try { record("tx","!\x18"); serial->write("!\x18"); } catch (const std::exception& e) { update({{"error",e.what()}}); }
+                try { record("tx","!"); serial->write("!"); }
+                catch (const std::exception& e) { stopped=true; stop_requested=false; update({{"error",e.what()}}); }
             } else {
                 require(action != "resume" || s["phase"] == "paused", "Task is not paused");
                 paused = action == "pause";
@@ -239,7 +251,7 @@ Json Controller::call(const std::string& action, const Json& data) {
         auto port = data.at("port").get<std::string>(); bool allowed = false;
         auto available = ports();
         for (auto& entry : available["ports"]) if (entry["device"] == port) allowed = true;
-        require(allowed, "Serial port is not in the allowed device list"); stopped = false; manual_cancel = false;
+        require(allowed, "Serial port is not in the allowed device list"); stopped = false; stop_requested = false; manual_cancel = false;
         serial = factory ? factory(port) : simulate ? simulated_serial() : open_serial(port);
         try {
             if (!simulate && !factory) { auto end = Clock::now()+2s; while (Clock::now()<end) read(); }
@@ -260,21 +272,21 @@ Json Controller::call(const std::string& action, const Json& data) {
             auto s = state(); require(s["job_id"] == id, "Task already executed; generate a new task"); return s;
         }
         join_finished(); require(state()["connected"] == true, "Connect the machine first");
-        require(state()["phase"] == "idle" || state()["phase"] == "complete", "Handle the current machine state first");
+        require(state()["phase"] == "idle" || state()["phase"] == "complete" || state()["phase"] == "stopped", "Handle the current machine state first");
         require(data.value("origin_confirmed",false), "Confirm paper and origin first");
         require(fs::exists(folder/"ready"), "Task upload is incomplete"); validate_job(folder,meta);
-        atomic_json(folder/"probe.json", check(meta));
+        auto probe=check(meta); atomic_json(folder/"probe.json",probe);
         // A durable claim precedes any motion. Crashes require a new job ID.
         claim_job(folder);
-        stopped = false; paused = false;
-        update({{"phase","running"},{"operation_type","writing"},{"job_id",id},{"acknowledged",0},{"total",meta.at("commands")},{"error",nullptr}});
+        stopped = false; stop_requested = false; paused = false;
+        update({{"phase","running"},{"operation_type","writing"},{"job_id",id},{"acknowledged",0},{"total",meta.at("commands")},{"error",nullptr},{"task_origin",probe["position"]},{"returned_to_origin",false}});
         try { save(folder); } catch (const std::exception& e) { failure(e.what(),false); throw; }
         busy = true;
-        try { worker = std::thread(&Controller::run_job,this,folder); } catch (...) { busy=false; update({{"phase","failed"},{"operation_type",nullptr}}); throw; }
+        try { worker = std::thread(&Controller::run_job,this,folder,probe["position"]); } catch (...) { busy=false; update({{"phase","failed"},{"operation_type",nullptr}}); throw; }
         return state();
     }
     join_finished(); require(state()["connected"] == true, "Connect the machine first");
-    require(state()["phase"] == "idle" || state()["phase"] == "complete", "Handle the current machine state first");
+    require(state()["phase"] == "idle" || state()["phase"] == "complete" || state()["phase"] == "stopped", "Handle the current machine state first");
     if (action == "check") { check(data.value("metadata",Json::object())); return state(); }
     std::vector<std::string> steps;
     if (action == "jog") {
@@ -309,7 +321,41 @@ void Controller::run_manual(std::vector<std::string> steps) {
     } catch (const Cancelled&) {} catch (const std::exception& e) { failure(e.what(),true); }
     busy=false;
 }
-void Controller::run_job(fs::path folder) {
+void Controller::return_after_stop(const fs::path& folder, const Json& origin) {
+    require(origin.is_array() && origin.size()==3 && std::abs(origin[2].get<double>())<=.01,"Missing task origin");
+    auto deadline=Clock::now()+15s;
+    Json held;
+    for (;;) {
+        auto report=status();
+        if (starts(report,"<Hold:0|")) { held=state()["position"]; break; }
+        // An Idle report may predate the hold request. Require its explicit
+        // completion acknowledgement before resetting a potentially moving axis.
+        require(starts(report,"<Hold:1|") || starts(report,"<Run|") || starts(report,"<Idle"),"Machine did not stop safely");
+        require(Clock::now()<deadline,"Feed hold completion timeout"); std::this_thread::sleep_for(30ms);
+    }
+    require(held.is_array() && held.size()==3,"Missing stopped machine position");
+    // Reset only after a complete feed hold. Wait for a fresh startup banner so
+    // stale queued status/ack replies cannot authorize recovery motion.
+    write("\x18",true);
+    deadline=Clock::now()+8s; bool initialized=false;
+    while (Clock::now()<deadline) { if (starts(read(),"Grbl ")) { initialized=true; break; } }
+    require(initialized,"Controller reset confirmation missing; return cancelled");
+    auto probe=check(manifest(folder),false);
+    for (size_t i=0;i<3;++i) require(std::abs(probe["position"][i].get<double>()-held[i].get<double>())<=.01,"Position changed after reset; return cancelled");
+    update({{"phase","returning"},{"last_action","Raising pen before returning to task origin"}});
+    command("$J=G21 G90 G53 Z0 F600"); wait_idle(false);
+    require(state()["pen_top"]==true,"Pen did not reach Z0; XY return cancelled");
+    update({{"last_action","Returning XY to task origin"}});
+    std::ostringstream target; target.imbue(std::locale::classic());
+    target<<std::fixed<<std::setprecision(3)<<"$J=G21 G90 G53 X"<<origin[0].get<double>()<<" Y"<<origin[1].get<double>()<<" F1000";
+    command(target.str()); wait_idle(false);
+    auto position=state()["position"];
+    require(position.is_array() && position.size()==3,"Missing final machine position");
+    for (size_t i=0;i<3;++i) require(std::abs(position[i].get<double>()-origin[i].get<double>())<=.01,"Machine did not return to task origin");
+    std::lock_guard<std::mutex> tx(tx_mutex); cancelled();
+    update({{"phase","stopped"},{"operation_type",nullptr},{"returned_to_origin",true},{"last_action","Task stopped; pen raised and returned to task origin"}});
+}
+void Controller::run_job(fs::path folder, Json origin) {
     try {
         { std::lock_guard<std::mutex> lock(log_mutex); log.open(folder/"serial.jsonl",std::ios::app); require(bool(log),"Cannot open serial log"); }
         std::ifstream file(folder/"job.gcode"); std::string line; size_t count=0;
@@ -327,10 +373,17 @@ void Controller::run_job(fs::path folder) {
         require(std::abs(offsets["G54"][2])<=.01 && std::abs(offsets["G92"][2])<=.01 && std::abs(offsets["TLO"][0])<=.01,"Unexpected final Z/tool offset");
         for (size_t i=0;i<3;++i) require(std::abs(p[i].get<double>()-(i==2?0:offsets["G54"][i]+offsets["G92"][i]))<=.01,"Machine did not return to the task origin");
         { std::lock_guard<std::mutex> tx(tx_mutex); cancelled(); update({{"phase","complete"},{"operation_type",nullptr}}); }
-    } catch (const Cancelled&) {} catch (const std::exception& e) { if (!stopped) failure(e.what(),false); }
+    } catch (const Cancelled&) {} catch (const std::exception& e) {
+        stop_requested=false; failure(e.what(),false);
+    }
+    if (stop_requested && !stopped) {
+        stop_requested=false;
+        try { return_after_stop(folder,origin); }
+        catch (const Cancelled&) {} catch (const std::exception& e) { failure(e.what(),false); }
+    }
     if (stopped) {
         std::lock_guard<std::mutex> tx(tx_mutex); serial.reset();
-        update({{"phase","stopped"},{"connected",false},{"operation_type",nullptr},{"position",nullptr},{"pen","unknown"},{"pen_top",nullptr},{"status",""},{"last_action","Task stopped; reconnect and confirm origin"}});
+        update({{"phase","stopped"},{"connected",false},{"operation_type",nullptr},{"position",nullptr},{"pen","unknown"},{"pen_top",nullptr},{"status",""},{"returned_to_origin",false},{"last_action","Return cancelled; reconnect and confirm position"}});
     }
     try { save(folder); } catch (const std::exception& e) { failure(e.what(),false); }
     { std::lock_guard<std::mutex> lock(log_mutex); log.close(); }

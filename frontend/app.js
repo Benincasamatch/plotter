@@ -24,7 +24,7 @@ let builtinPresets=notebookPresets;
 let layoutPresets=[], selectedPreset='a4-portrait', deletedPreset=null;
 const fontPresetStorage='plotter.font-presets.v1';
 let fontPresets=[], selectedFontPreset='', deletedFontPreset=null, fontPresetsLoaded=false;
-const phases = {disconnected:'等待连接',idle:'机器已连接',running:'正在写字',paused:'已请求暂停 · 等待继续',draining:'等待机器完成动作',complete:'写字完成 · 已抬笔返回原点',failed:'任务中断 · 请检查控制器',manual:'手动动作中',manual_stopping:'正在停止手动动作',stopping:'正在终止写字任务',stopped:'任务已终止 · 请重新连接并定位原点'};
+const phases = {disconnected:'等待连接',idle:'机器已连接',running:'正在写字',paused:'已请求暂停 · 等待继续',draining:'等待机器完成动作',complete:'写字完成 · 已抬笔返回原点',failed:'任务中断 · 请检查控制器',manual:'手动动作中',manual_stopping:'正在停止手动动作',stopping:'正在减速终止并清空路径',returning:'正在抬笔并返回本次书写原点',stopped:'任务已终止 · 已抬笔返回本次原点'};
 function notice(message, error=false) {
   $('notice').textContent=message; $('notice').className=error?'error':''; $('notice').hidden=false;
   clearTimeout(noticeTimer); noticeTimer=setTimeout(()=>$('notice').hidden=true,error?10000:4500);
@@ -39,7 +39,7 @@ async function request(path, data) {
   return response;
 }
 async function api(path,data) {return (await request(path,data)).json();}
-function writing(){return state.operation_type==='writing'||['running','paused','draining','stopping'].includes(state.phase);}
+function writing(){return state.operation_type==='writing'||['running','paused','draining','stopping','returning'].includes(state.phase);}
 function active(){return writing()||['manual','manual_stopping'].includes(state.phase);}
 function renderState(){
   if(observedMotionRevision!==null&&state.motion_revision!==undefined&&observedMotionRevision!==state.motion_revision){
@@ -56,8 +56,9 @@ function renderState(){
   $('pause').disabled=!writing()||!['running','draining'].includes(state.phase);
   $('resume').disabled=state.phase!=='paused';
   $('stop').disabled=!writing()||state.phase==='stopping';
+  $('stop').textContent=state.phase==='returning'?'停止回原点':'终止任务';
   const manual=['manual','manual_stopping'].includes(state.phase), controllerIdle=state.mode==='simulation'||(state.status||'').startsWith('<Idle');
-  const writable=state.connected&&controllerIdle&&!active()&&!busy&&['idle','complete'].includes(state.phase);
+  const writable=state.connected&&controllerIdle&&!active()&&!busy&&['idle','complete','stopped'].includes(state.phase);
   $('manualControls').disabled=writing();
   $('consoleLock').textContent=writing()?'写字任务中 · 已锁定':state.connected?'手动控制可用':'连接机器后可用';
   for(const key of ['penUp','penDown','jogDistance','jogFeed'])$(key).disabled=!writable;
@@ -70,7 +71,7 @@ function renderState(){
   $('consolePosition').textContent=state.position?`Z ${state.position[2].toFixed(3)} mm`:'Z —';
   $('penState').textContent=({up:'顶部 · Z0',down:'控制器 Z10',unknown:'笔位置待确认'})[state.pen||'unknown'];
   $('consoleLastAction').textContent=state.last_action||'单击移动一次，方向按机器输出轴，见预览箭头。暂停会取消本次微动。';
-  $('phase').textContent=phases[state.phase]||state.phase;
+  $('phase').textContent=state.phase==='stopped'&&state.returned_to_origin!==true?'回原点已取消 · 请重新连接并确认位置':phases[state.phase]||state.phase;
   $('progressText').textContent=`${state.acknowledged} / ${state.total}`;
   $('progressFill').style.width=(state.total?100*state.acknowledged/state.total:0)+'%';
   $('machineStatus').textContent=state.status?`${(state.status.match(/^<([^|>]+)/)||[])[1]||'未知状态'} · Z0 抬笔 / Z10 落笔`:'115200 baud · Z0 抬笔 / Z10 落笔';
@@ -465,7 +466,7 @@ $('check').onclick=()=>action(async()=>{state=await api('/api/check',{job_id:cur
 $('start').onclick=()=>action(async()=>{const job=currentJob;state=await api('/api/start',{job_id:job,origin_confirmed:$('origin').checked});startedJobs.add(job);if(currentJob===job)currentJob=null;$('origin').checked=false;notice(state.mode==='simulation'?'模拟单页任务开始':'当前页写字任务开始；完成并换纸后再选择下一页');});
 $('pause').onclick=()=>realtimeAction(async()=>{state=await api('/api/pause',{});});
 $('resume').onclick=()=>realtimeAction(async()=>{state=await api('/api/resume',{});});
-$('stop').onclick=()=>realtimeAction(async()=>{state=await api('/api/stop',{});$('origin').checked=false;currentJob=null;notice('已请求终止；完成后需重新连接并定位原点');});
+$('stop').onclick=()=>realtimeAction(async()=>{const returning=state.phase==='returning';state=await api('/api/stop',{});$('origin').checked=false;currentJob=null;notice(returning?'已请求停止回原点；请重新连接并确认位置':'已请求终止；停稳后先抬笔至 Z0，再返回本次 XY 原点');});
 $('penUp').onclick=()=>action(async()=>{state=await api('/api/pen',{position:'up'});});
 $('penDown').onclick=()=>action(async()=>{state=await api('/api/pen',{position:'down'});});
 $('manualPause').onclick=()=>realtimeAction(async()=>{state=await api('/api/manual-pause',{});});

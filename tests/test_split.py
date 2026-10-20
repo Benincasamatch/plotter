@@ -198,6 +198,44 @@ class SplitIntegrationTests(unittest.TestCase):
             self.assertEqual(sent,expected)
         with self.call('/api/disconnect',{}): pass
 
+    def test_e_stop_raises_pen_and_returns_to_each_task_origin(self):
+        with self.call('/api/connect', {'port':'SIMULATOR'}): pass
+        for paused in (False, True):
+            with self.call('/api/jog',dict(axis='X',distance=14,feed=300)): pass
+            self.wait('idle')
+            with self.call('/api/jog',dict(axis='Y',distance=-16,feed=300)): pass
+            origin=self.wait('idle')['position']
+            with self.call('/api/preview',dict(font_id=next(iter(self.app.fonts)),text='Hello world! '*8,seed='stop-return')) as r:
+                preview=json.load(r)
+            job_id=preview['job_id']
+            with self.call('/api/start',dict(job_id=job_id,origin_confirmed=True)): pass
+            deadline=time.monotonic()+5
+            while self.client.snapshot()['acknowledged']<6 and time.monotonic()<deadline: time.sleep(.005)
+            if paused:
+                with self.call('/api/pause',{}): pass
+            with self.call('/api/stop',{}) as r:
+                self.assertIn(json.load(r)['phase'],('stopping','returning','stopped'))
+            state=self.wait('stopped')
+            self.assertTrue(state['connected'])
+            self.assertTrue(state['returned_to_origin'])
+            self.assertTrue(state['pen_top'])
+            self.assertEqual(state['position'],origin)
+            self.assertEqual(state['task_origin'],origin)
+            self.assertLess(state['acknowledged'],state['total'])
+            with self.call('/api/start',dict(job_id=job_id,origin_confirmed=True)) as r:
+                self.assertEqual(json.load(r)['phase'],'stopped')
+            folder=pathlib.Path(self.temp.name)/'device'/job_id
+            records=[json.loads(line) for line in (folder/'serial.jsonl').read_text(encoding='utf8').splitlines()]
+            sent=[bytes.fromhex(v['hex']) for v in records if v['direction']=='tx']
+            hold=sent.index(b'!')
+            reset=sent.index(b'\x18',hold)
+            z=sent.index(b'$J=G21 G90 G53 Z0 F600\n',reset)
+            xy=next(i for i in range(z+1,len(sent)) if sent[i].startswith(b'$J=G21 G90 G53 X'))
+            self.assertLess(hold,reset);self.assertLess(reset,z);self.assertLess(z,xy)
+            self.assertFalse(any(raw.startswith(b'G1 ') for raw in sent[hold:]))
+            with self.call('/api/check',{}): pass
+        with self.call('/api/disconnect',{}): pass
+
 
 if __name__ == '__main__':
     unittest.main()
