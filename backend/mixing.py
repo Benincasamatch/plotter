@@ -5,6 +5,7 @@ import math
 import random
 import secrets
 from backend.humanization import settings, active, Variation
+from backend.wrapping import preferred_space
 
 
 def font_choices(data, available):
@@ -101,8 +102,8 @@ def layout_mixed(choices, data, text, size, spacing, pitch, usable, loader):
                     continue
                 if not line or measure([token]) > usable:
                     raise ValueError('单个字符超过纸张宽度，请减小字号')
-                split = next((i for i in range(len(line) - 1, -1, -1) if line[i]['char'] == ' '), -1)
-                if split > 0 and token['char'] != ' ':
+                split = preferred_space([t['char'] for t in line], token['char'])
+                if split > 0:
                     lines.append(rstrip(line[:split]))
                     line = line[split + 1:] + [token]
                 else:

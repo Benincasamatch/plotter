@@ -1,14 +1,61 @@
 'use strict';
 const $ = id => document.getElementById(id);
+$('chooseFonts').addEventListener('click',()=>{$('fontDialog').showModal();$('fontSearch').focus();});
+$('closeFontDialog').addEventListener('click',()=>{$('fontDialog').close();});
+
+const sizingPanel=document.querySelector('.notebook-sizing');
+$('width').closest('.grid').before(sizingPanel);sizingPanel.hidden=true;
 const checkButton = document.createElement('button');
 checkButton.id='check';checkButton.className='text-button';checkButton.textContent='检查原点与配置（只读）';
 checkButton.style.marginTop='16px';document.querySelector('.connect-row').after(checkButton);
 let fonts = [], currentJob = null, downloadJob = null, state = {connected:false,phase:'disconnected',total:0,acknowledged:0}, busy = false;
 let lastError = '', noticeTimer, revision = 0, actionRevision = 0;
 let selectedFonts = [];
+let deviceProfiles=Object.create(null), profilePort='', profileLoaded=false;
+const defaultDeviceControl={controller_type:'kenjoy-grbl',pen_up:0,pen_down:10,pen_feed:600};
+function deviceControl(){return {controller_type:$('controllerType').value,pen_up:Number($('penUpZ').value),pen_down:Number($('penDownZ').value),pen_feed:Number($('penFeed').value)};}
+function deviceLabel(port){return deviceProfiles[port]?.name?deviceProfiles[port].name+' · '+port:port;}
+function renderDeviceNames(){
+  for(const option of $('port').options)option.textContent=deviceLabel(option.value)+(option.dataset.description?' · '+option.dataset.description:'');
+  $('connection').textContent=state.connected?'已连接 · '+deviceLabel(state.port):'未连接机器';
+  $('saveDeviceName').disabled=!profilePort||busy;
+}
+function captureDeviceProfile(port=profilePort){
+  return {port,name:$('deviceName').value.trim(),device_control:deviceControl(),coordinate_system:coordinateSettings(),
+    feed:Number($('feed').value),move_feed:Number($('moveFeed').value),jog_distance:Number($('jogDistance').value),jog_feed:Number($('jogFeed').value)};
+}
+async function saveDeviceProfile(){
+  if(!profilePort)throw new Error('请先选择设备端口');
+  const result=await api('/api/device-profiles',captureDeviceProfile());
+  deviceProfiles[profilePort]=result.profile;renderDeviceNames();
+}
+function applyDeviceProfile(port){
+  profilePort=port;
+  const profile=deviceProfiles[port], control=profile?.device_control||defaultDeviceControl;
+  $('deviceName').value=profile?.name||'';
+  $('controllerType').value=control.controller_type;
+  $('penUpZ').value=control.pen_up;$('penDownZ').value=control.pen_down;$('penFeed').value=control.pen_feed;
+  const coords=profile?.coordinate_system||{reverse_x:false,reverse_y:false,swap_xy:false,origin:'top-left'};
+  $('reverseX').checked=coords.reverse_x;$('reverseY').checked=coords.reverse_y;$('swapXY').checked=coords.swap_xy;$('originCorner').value=coords.origin;
+  $('feed').value=profile?.feed??1800;$('moveFeed').value=profile?.move_feed??3000;
+  $('jogDistance').value=profile?.jog_distance??1;$('jogFeed').value=profile?.jog_feed??300;
+  // Restoring settings never transmits a movement or reuses a previous task origin.
+  coordinateChanged();renderDeviceNames();
+}
+$('port').addEventListener('change',()=>{
+  const next=$('port').value, previous=profilePort;
+  if(busy||state.connected){$('port').value=previous;return;}
+  action(async()=>{
+    try{if(previous)await saveDeviceProfile();applyDeviceProfile(next);notice('已切换设备档案，请核对配置并重新生成预览');}
+    catch(error){$('port').value=previous;throw error;}
+  });
+});
+$('saveDeviceName').addEventListener('click',()=>action(async()=>{await saveDeviceProfile();notice('设备档案已保存到服务端，控制参数在下次连接时载入');}));
+$('deviceName').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();$('saveDeviceName').click();}});
 let axisRevision = 0, axisTimer;
 let observedMotionRevision = null;
-const layoutFields=['width','height','marginTop','marginBottom','marginLeft','marginRight','rows','size','spacing','feed','punctuationWidth','gridColumns','gridRowGap','gridColumnGap','gridSizePercent','gridPadding'];
+let speedTimer, speedPending=null, speedSending=false, speedJob=null;
+const layoutFields=['width','height','marginTop','marginBottom','marginLeft','marginRight','rows','size','spacing','feed','moveFeed','punctuationWidth','gridColumns','gridRowGap','gridColumnGap','gridSizePercent','gridPadding'];
 let presetStorage='plotter.layout-presets.v1';
 let layoutMode='', modeDrafts={}, sourcePages=[$('text').value], sourceIndex=0, documentResult=null, outputIndex=0;
 const startedJobs=new Set();
@@ -16,7 +63,7 @@ const humanFields={vertical:'Vertical',scale:'Scale',rotation:'Rotation',spacing
 const humanDefault={enabled:false,vertical:.3,scale:5,rotation:2,spacing:.2,baseline:.4,
   vertical_enabled:true,scale_enabled:true,rotation_enabled:true,spacing_enabled:true,baseline_enabled:true};
 const humanLevels={light:[.15,3,1,.1,.2],medium:[.3,5,2,.2,.4],strong:[.6,10,4,.4,.8]};
-const defaultLayout={width:210,height:297,marginTop:30,marginBottom:30,marginLeft:30,marginRight:30,rows:20,size:5,spacing:.9,feed:1800,punctuationWidth:.8,gridColumns:20,gridRowGap:2.9,gridColumnGap:0,gridSizePercent:80,gridPadding:.3};
+const defaultLayout={width:210,height:297,marginTop:30,marginBottom:30,marginLeft:30,marginRight:30,rows:20,size:5,spacing:.9,feed:1800,moveFeed:3000,punctuationWidth:.8,gridColumns:20,gridRowGap:2.9,gridColumnGap:0,gridSizePercent:80,gridPadding:.3};
 const notebookPresets=[{id:'a4-portrait',name:'A4 竖向 · 210 × 297',values:{...defaultLayout}},
   {id:'a4-landscape',name:'A4 横向 · 297 × 210',values:{...defaultLayout,width:297,height:210}}];
 const gridPresets=[{id:'a4-grid',name:'A4 方格 · 20 行 × 20 列',values:{...defaultLayout,marginTop:41,marginBottom:41,marginLeft:26.5,marginRight:26.5}}];
@@ -41,47 +88,112 @@ async function request(path, data) {
 async function api(path,data) {return (await request(path,data)).json();}
 function writing(){return state.operation_type==='writing'||['running','paused','draining','stopping','returning'].includes(state.phase);}
 function active(){return writing()||['manual','manual_stopping'].includes(state.phase);}
+function formatEtaDuration(seconds){
+  const minutes=Math.max(1,Math.ceil(seconds/60));
+  if(seconds<60)return '不足 1 分钟';
+  return minutes>=60?`${Math.floor(minutes/60)} 小时${minutes%60?' '+minutes%60+' 分钟':''}`:`${minutes} 分钟`;
+}
+function renderEta(){
+  const eta=state.eta||{},remaining=eta.remaining_seconds;
+  let title='预计剩余 —',detail='开始任务后显示预计剩余时间。';
+  if(!state.connected&&state.job_id&&state.phase!=='disconnected'){title='ETA 暂不可用';detail='连接恢复后更新估算。';}
+  else if(state.phase==='complete'){title='任务已完成';detail='已收到机器完成确认。';}
+  else if(['stopping','returning','stopped','failed'].includes(state.phase)){detail='任务已终止或正在回位，不再估算书写时间。';}
+  else if(state.phase==='paused'){
+    title=`已暂停${Number.isFinite(remaining)?' · 剩余约 '+formatEtaDuration(remaining):''}`;
+    detail='继续后更新预计完成时间，暂停时间不计入书写速度。';
+  }else if(eta.status==='draining'){
+    title='机器收尾中';detail=Number.isFinite(remaining)?`预计还需 ${formatEtaDuration(remaining)}，等待机器确认完成。`:'路径已发送，等待机器确认完成。';
+  }else if(['running','draining'].includes(state.phase)){
+    if(Number.isFinite(remaining)&&remaining>0){
+      title='预计剩余约 '+formatEtaDuration(remaining);
+      const finish=Number.isFinite(eta.estimated_finish_at)?new Date(eta.estimated_finish_at*1000):null;
+      detail=(finish?`预计完成 ${finish.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false})} · `:'')+
+        (eta.source==='observed'?'随实际进度和调速自动更新。':'按路径初估，运行后自动校准。');
+    }else{title='正在估算剩余时间…';detail='采集实际进度后显示 ETA。';}
+  }
+  $('taskEta').textContent=title;$('etaDetail').textContent=detail;
+}
+function canAdjustSpeed(){return state.connected&&['running','paused','draining'].includes(state.phase)&&Number.isInteger(state.feed_override);}
+function renderSpeed(){
+  const enabled=canAdjustSpeed();
+  if(speedJob!==state.job_id||!enabled){clearTimeout(speedTimer);speedPending=null;speedJob=state.job_id;}
+  $('liveSpeed').disabled=!enabled;$('resetSpeed').disabled=!enabled;
+  $('liveSpeed').max=state.speed_max_percent??200;
+  if(speedPending===null&&!speedSending){
+    $('liveSpeed').value=state.feed_override_requested??100;
+    $('liveSpeedValue').textContent=$('liveSpeed').value+'%';
+  }
+  const limit=state.speed_limit??10000;
+  $('liveSpeedStatus').textContent=state.speed_limit_update_pending?'当前任务继续运行；结束后自动启用 12000 mm/min 上限，更新期间暂不启动新任务。':enabled?`控制器已应用 ${state.feed_override}%${state.feed_override!==state.feed_override_requested?' · 正在调整至 '+state.feed_override_requested+'%':''}。最高 ${limit} mm/min，倍率也影响移笔和抬落笔。`:
+    writing()?'当前阶段或固件不支持实时调速。':'书写或暂停时可拖动调速，无需重新生成路径；每个新任务恢复 100%。';
+}
+async function sendSpeed(){
+  if(speedSending||speedPending===null||!canAdjustSpeed())return;
+  const percent=speedPending,jobId=speedJob;speedPending=null;speedSending=true;actionRevision++;
+  const capturedAction=actionRevision;
+  try{
+    const result=await api('/api/speed',{percent,job_id:jobId});
+    if(state.job_id===jobId&&actionRevision===capturedAction)state=result;
+  }catch(error){speedPending=null;notice('调速未成功：'+error.message,true);}
+  finally{actionRevision++;speedSending=false;renderState();if(speedPending!==null)speedTimer=setTimeout(sendSpeed,120);}
+}
+function queueSpeed(percent){
+  if(!canAdjustSpeed())return;
+  percent=Math.max(10,Math.min(state.speed_max_percent??200,percent));
+  speedJob=state.job_id;speedPending=percent;
+  $('liveSpeed').value=percent;$('liveSpeedValue').textContent=percent+'%';
+  clearTimeout(speedTimer);speedTimer=setTimeout(sendSpeed,120);
+}
+$('liveSpeed').addEventListener('input',()=>queueSpeed(Number($('liveSpeed').value)));
+$('resetSpeed').onclick=()=>queueSpeed(100);
 function renderState(){
+  renderSpeed();
+  renderEta();
   if(observedMotionRevision!==null&&state.motion_revision!==undefined&&observedMotionRevision!==state.motion_revision){
     $('origin').checked=false;
     $('previewStatus').textContent='笔位置已调整，预览保留；请确认当前位置作为本次原点。';
   }
   if(state.motion_revision!==undefined)observedMotionRevision=state.motion_revision;
-  $('connection').textContent=state.connected?'已连接 · '+state.port:'未连接机器';
+  $('connection').textContent=state.connected?'已连接 · '+deviceLabel(state.port):'未连接机器';
   $('connection').classList.toggle('online',state.connected);
   $('mode').textContent=state.mode==='simulation'?'模拟模式 · 不落笔':'C++ 控制服务';
-  $('connect').disabled=state.connected||busy; $('disconnect').disabled=!state.connected||active()||state.phase==='failed'||busy;
-  $('check').disabled=!state.connected||active()||state.phase==='failed'||busy;
-  $('start').disabled=!state.connected||!currentJob||!$('origin').checked||active()||busy||state.phase==='failed';
+  $('port').disabled=state.connected||busy||active();
+  for(const key of ['controllerType','penUpZ','penDownZ','penFeed'])$(key).disabled=state.connected||busy;
+  $('saveDeviceName').disabled=busy||!profilePort;
+  $('connect').disabled=state.connected||busy||state.speed_limit_update_pending===true; $('disconnect').disabled=!state.connected||active()||state.phase==='failed'||busy;
+  $('check').disabled=!state.connected||active()||state.phase==='failed'||busy||state.speed_limit_update_pending===true;
+  $('start').disabled=!state.connected||!currentJob||!$('origin').checked||active()||busy||state.phase==='failed'||state.speed_limit_update_pending===true;
   $('pause').disabled=!writing()||!['running','draining'].includes(state.phase);
   $('resume').disabled=state.phase!=='paused';
   $('stop').disabled=!writing()||state.phase==='stopping';
   $('stop').textContent=state.phase==='returning'?'停止回原点':'终止任务';
   const manual=['manual','manual_stopping'].includes(state.phase), controllerIdle=state.mode==='simulation'||(state.status||'').startsWith('<Idle');
-  const writable=state.connected&&controllerIdle&&!active()&&!busy&&['idle','complete','stopped'].includes(state.phase);
+  const writable=state.connected&&controllerIdle&&!active()&&!busy&&!state.speed_limit_update_pending&&['idle','complete','stopped'].includes(state.phase);
   $('manualControls').disabled=writing();
   $('consoleLock').textContent=writing()?'写字任务中 · 已锁定':state.connected?'手动控制可用':'连接机器后可用';
   for(const key of ['penUp','penDown','jogDistance','jogFeed'])$(key).disabled=!writable;
   $('penUp').disabled=!writable||state.pen_top!==false;
-  $('penUp').textContent=state.pen_top===true?'已在顶部':'抬笔 / Z0';
-  $('penUp').title=state.pen_top===true?'控制器报告 Z0，已禁用重复抬笔':'读取最新 Z 坐标后抬笔';
+  $('penUp').textContent=state.pen_top===true?'已在顶部':'抬笔 / Z'+(state.device_control?.pen_up??deviceControl().pen_up);
+  $('penUp').title=state.pen_top===true?'已到达配置的抬笔位置':'读取最新 Z 坐标后抬笔';
   for(const button of document.querySelectorAll('[data-jog-axis],[data-step]'))button.disabled=!writable;
   $('manualPause').disabled=!manual||state.phase==='manual_stopping';
   $('manualStop').disabled=!manual||state.phase==='manual_stopping';
   $('consolePosition').textContent=state.position?`Z ${state.position[2].toFixed(3)} mm`:'Z —';
-  $('penState').textContent=({up:'顶部 · Z0',down:'控制器 Z10',unknown:'笔位置待确认'})[state.pen||'unknown'];
+  $('penState').textContent=({up:'已抬笔',down:'已落笔',unknown:'笔位置待确认'})[state.pen||'unknown'];
   $('consoleLastAction').textContent=state.last_action||'单击移动一次，方向按机器输出轴，见预览箭头。暂停会取消本次微动。';
   $('phase').textContent=state.phase==='stopped'&&state.returned_to_origin!==true?'回原点已取消 · 请重新连接并确认位置':phases[state.phase]||state.phase;
   $('progressText').textContent=`${state.acknowledged} / ${state.total}`;
   $('progressFill').style.width=(state.total?100*state.acknowledged/state.total:0)+'%';
-  $('machineStatus').textContent=state.status?`${(state.status.match(/^<([^|>]+)/)||[])[1]||'未知状态'} · Z0 抬笔 / Z10 落笔`:'115200 baud · Z0 抬笔 / Z10 落笔';
+  const actualFeed=(state.status||'').match(/\|FS:([\d.]+),/);
+  $('machineStatus').textContent=state.status?`${(state.status.match(/^<([^|>]+)/)||[])[1]||'未知状态'}${actualFeed?' · 瞬时进给 '+actualFeed[1]+' mm/min':''} · 抬笔 Z${state.device_control?.pen_up??deviceControl().pen_up} / 落笔 Z${state.device_control?.pen_down??deviceControl().pen_down}`:`115200 baud · 抬笔 Z${deviceControl().pen_up} / 落笔 Z${deviceControl().pen_down}`;
   $('download').disabled=!downloadJob;
   $('downloadAll').disabled=!documentResult||busy;
   $('rerandomize').disabled=busy;
 }
 function invalidate(){sourcePages[sourceIndex]=$('text').value;revision++;$('origin').checked=false;currentJob=null;downloadJob=null;documentResult=null;renderOutputNavigation();$('fontUsage').hidden=true;$('previewStatus').textContent='参数已修改，请重新生成全部页面后下载或写入。';updateCount();renderState();if($('paperView').querySelector('svg'))$('phase').textContent=active()?(phases[state.phase]+' · 编辑内容未执行'):'内容已修改，请重新生成预览';}
 function coordinateSettings(){return {reverse_x:$('reverseX').checked,reverse_y:$('reverseY').checked,swap_xy:$('swapXY').checked,origin:$('originCorner').value};}
-function paperSettings(){return {layout_mode:layoutMode||'notebook',pagination:$('pagination').value,width:Number($('width').value),height:Number($('height').value),margin_top:Number($('marginTop').value),margin_bottom:Number($('marginBottom').value),margin_left:Number($('marginLeft').value),margin_right:Number($('marginRight').value),rows:Number($('rows').value),size:Number($('size').value),punctuation_width:Number($('punctuationWidth').value),grid:{columns:Number($('gridColumns').value),row_gap:Number($('gridRowGap').value),column_gap:Number($('gridColumnGap').value),size_percent:Number($('gridSizePercent').value),padding:Number($('gridPadding').value),draw_lines:$('gridDrawLines').checked},coordinate_system:coordinateSettings(),humanization:currentHumanization()};}
+function paperSettings(){syncNotebookSizing();return {line_sizing:$('lineSizing').value,line_looseness:Number($('lineLooseness').value),layout_mode:layoutMode||'notebook',pagination:$('pagination').value,width:Number($('width').value),height:Number($('height').value),margin_top:Number($('marginTop').value),margin_bottom:Number($('marginBottom').value),margin_left:Number($('marginLeft').value),margin_right:Number($('marginRight').value),rows:Number($('rows').value),size:Number($('size').value),punctuation_width:Number($('punctuationWidth').value),grid:{columns:Number($('gridColumns').value),row_gap:Number($('gridRowGap').value),column_gap:Number($('gridColumnGap').value),size_percent:Number($('gridSizePercent').value),padding:Number($('gridPadding').value),draw_lines:$('gridDrawLines').checked},coordinate_system:coordinateSettings(),device_port:profilePort,device_control:deviceControl(),humanization:currentHumanization()};}
 function currentHumanization(){
   const result={enabled:$('humanEnabled').checked};
   for(const [key,suffix] of Object.entries(humanFields)){result[key]=Number($('human'+suffix).value);result[key+'_enabled']=$('human'+suffix+'Enabled').checked;}
@@ -112,7 +224,7 @@ function renderCoordinateInfo(metadata){
   $('axisSummary').textContent=`本次原点：${metadata.origin_label} · X+ ${xd} · Y+ ${yd}`;
   const b=metadata.machine_bounds||metadata.machine_page_bounds;
   $('axisRange').textContent=`${metadata.machine_bounds?'路径':'纸张'}输出范围 / mm：X [${b[0]}, ${b[2]}] · Y [${b[1]}, ${b[3]}]`;
-  $('originText').textContent=`已将笔移至所测范围${metadata.origin_label}角并抬笔至 Z0；当前位置作为本次原点，X+ ${xd}、Y+ ${yd}。`;
+  $('originText').textContent=`已将笔移至所测范围${metadata.origin_label}角并抬笔至 Z${deviceControl().pen_up}；当前位置作为本次原点，X+ ${xd}、Y+ ${yd}。`;
 }
 function displayPaper(svg, metadata, preservePaths=false){
   const parsed=new DOMParser().parseFromString(svg,'image/svg+xml');
@@ -136,7 +248,30 @@ async function refreshCoordinatePreview(){
     displayPaper(guide.svg,guide.metadata);
   }catch(error){if(requestRevision===axisRevision&&captured===revision)notice(error.message,true);}
 }
-function coordinateChanged(){invalidate();$('origin').checked=false;clearTimeout(axisTimer);axisTimer=setTimeout(refreshCoordinatePreview,150);}
+function notebookSizing(){return {lineSizing:$('lineSizing').value,lineLooseness:Number($('lineLooseness').value)};}
+function validNotebookSizing(value){return (value.lineSizing===undefined||['rows','size'].includes(value.lineSizing))&&(value.lineLooseness===undefined||(typeof value.lineLooseness==='number'&&Number.isFinite(value.lineLooseness)&&value.lineLooseness>=1&&value.lineLooseness<=4));}
+function restoreNotebookSizing(value){
+  $('lineSizing').value=value.lineSizing||'rows';
+  const v=value.values||currentLayout(),ratio=(v.height-v.marginTop-v.marginBottom)/v.rows/v.size;
+  $('lineLooseness').value=value.lineLooseness??Math.max(1,Math.min(4,Math.round(ratio*100)/100));
+  syncNotebookSizing();
+}
+function syncNotebookSizing(){
+  const notebook=layoutMode!=='grid',mode=$('lineSizing').value;
+  $('rows').readOnly=notebook&&mode==='size';$('size').readOnly=notebook&&mode==='rows';
+  $('rows').closest('label').firstChild.textContent=$('rows').readOnly?'每页行数（自动）':'每页行数';
+  $('size').closest('label').firstChild.textContent=$('size').readOnly?'字高 / mm（自动）':'字高 / mm';
+  $('rows').title=$('rows').readOnly?'根据字高和松紧自动计算':'';$('size').title=$('size').readOnly?'根据行数和松紧自动计算':'';
+  if(!notebook)return;
+  const ratio=Number($('lineLooseness').value);
+  $('lineLoosenessValue').textContent=ratio.toFixed(2)+' 倍行距';
+  try{
+    const result=window.NotebookSizing.compute(currentLayout(),mode,ratio);
+    if(mode==='rows')$('size').value=Number(result.size.toFixed(6));else $('rows').value=result.rows;
+    $('lineSizingHint').textContent=`${mode==='rows'?'行数固定，拖动滑块调整自动字高':'字高固定，拖动滑块调整行距和自动行数'}：${result.rows} 行 · 字高 ${result.size.toFixed(2)} mm · 行距 ${result.pitch.toFixed(2)} mm · 行间留白 ${result.gap.toFixed(2)} mm。`;
+  }catch(error){$('lineSizingHint').textContent=error.message;}
+}
+function coordinateChanged(){syncNotebookSizing();invalidate();$('origin').checked=false;clearTimeout(axisTimer);axisTimer=setTimeout(refreshCoordinatePreview,150);}
 function findPreset(){return [...builtinPresets,...layoutPresets].find(p=>p.id===selectedPreset);}
 function validPresetValues(values,mode=layoutMode||'notebook'){
   if(!values||typeof values!=='object')return false;
@@ -146,7 +281,7 @@ function validPresetValues(values,mode=layoutMode||'notebook'){
   }
   if(!Number.isInteger(values.rows)||!Number.isInteger(values.gridColumns)||values.width<=values.marginLeft+values.marginRight)return false;
   const height=values.height-values.marginTop-values.marginBottom;
-  return mode==='notebook'?height>=values.rows*values.size:
+  return mode==='notebook'?height+.001>=values.rows*values.size:
     Math.min((values.width-values.marginLeft-values.marginRight-(values.gridColumns-1)*values.gridColumnGap)/values.gridColumns,(height-(values.rows-1)*values.gridRowGap)/values.rows)>2*values.gridPadding+.2;
 }
 function currentLayout(){return Object.fromEntries(layoutFields.map(key=>[key,Number($(key).value)]));}
@@ -163,7 +298,9 @@ function renderPresets(){
 }
 function updatePresetHint(){
   const preset=findPreset(), values=currentLayout();
-  const dirty=preset&&(layoutFields.some(key=>values[key]!==preset.values[key])||$('gridDrawLines').checked!==Boolean(preset.drawLines)||!sameHumanization(currentHumanization(),preset.humanization||humanDefault));
+  const oldRatio=preset?(preset.values.height-preset.values.marginTop-preset.values.marginBottom)/preset.values.rows/preset.values.size:2.37;
+  const savedRatio=preset?.lineLooseness??Math.max(1,Math.min(4,Math.round(oldRatio*100)/100));
+  const dirty=preset&&(layoutFields.some(key=>values[key]!==preset.values[key])||(layoutMode!=='grid'&&((preset.lineSizing||'rows')!==$('lineSizing').value||savedRatio!==Number($('lineLooseness').value)))||$('gridDrawLines').checked!==Boolean(preset.drawLines)||!sameHumanization(currentHumanization(),preset.humanization||humanDefault));
   $('presetHint').textContent=(dirty?'参数已修改，尚未保存。':'当前参数已载入预设。')+
     `保存${layoutMode==='grid'?'表格':'笔记'}模式的排版、标点、速度与仿真参数；仅保存在当前浏览器。`;
 }
@@ -173,6 +310,7 @@ function storePresets(presets=layoutPresets, selected=selectedPreset){
 function applyPreset(preset){
   selectedPreset=preset.id;
   for(const key of layoutFields)$(key).value=preset.values[key];
+  restoreNotebookSizing(preset);
   setHumanization(preset.humanization||humanDefault);
   $('gridDrawLines').checked=Boolean(preset.drawLines);
   $('presetName').value=layoutPresets.includes(preset)?preset.name:'';
@@ -185,7 +323,7 @@ function restorePresets(){
       const ids=new Set(builtinPresets.map(p=>p.id)), names=new Set();
       layoutPresets=saved.presets.slice(0,50).filter(p=>{
         if(p&&p.values&&typeof p.values==='object')p.values={...defaultLayout,...p.values};
-        if(!p||typeof p.id!=='string'||!p.id||p.id.length>100||ids.has(p.id)||typeof p.name!=='string'||!p.name.trim()||p.name.length>40||names.has(p.name)||!validPresetValues(p.values)||(p.humanization!==undefined&&!validHumanization(p.humanization)))return false;
+        if(!p||typeof p.id!=='string'||!p.id||p.id.length>100||ids.has(p.id)||typeof p.name!=='string'||!p.name.trim()||p.name.length>40||names.has(p.name)||!validPresetValues(p.values)||!validNotebookSizing(p)||(p.humanization!==undefined&&!validHumanization(p.humanization)))return false;
         ids.add(p.id);names.add(p.name);return true;
       });
       if([...builtinPresets,...layoutPresets].some(p=>p.id===saved.selected))selectedPreset=saved.selected;
@@ -193,11 +331,13 @@ function restorePresets(){
   }catch(error){/* Invalid or unavailable browser storage leaves built-in presets usable. */}
   const preset=findPreset();
   for(const key of layoutFields)$(key).value=preset.values[key];
+  restoreNotebookSizing(preset);
   setHumanization(preset.humanization||humanDefault);
   $('gridDrawLines').checked=Boolean(preset.drawLines);
   $('presetName').value=layoutPresets.includes(preset)?preset.name:'';renderPresets();
 }
 async function saveLayoutPreset(update=false){
+  const sizing=notebookSizing();
   const name=$('presetName').value.trim(), values=currentLayout(), humanization=currentHumanization(), capturedPreset=selectedPreset, drawLines=$('gridDrawLines').checked, capturedMode=layoutMode;
   if(!name||name.length>40)throw new Error('请输入 1–40 字的预设名称');
   if(!layoutFields.every(key=>$(key).value!==''&&$(key).checkValidity())||!validPresetValues(values))throw new Error('排版参数无效，请检查宽高、边距、行数和字大小');
@@ -208,7 +348,8 @@ async function saveLayoutPreset(update=false){
   await api('/api/coordinate-preview',paperSettings());
   // Capture values before validation, and refuse to save if an edit raced it.
   if(layoutMode!==capturedMode||$('gridDrawLines').checked!==drawLines||selectedPreset!==capturedPreset||layoutFields.some(key=>Number($(key).value)!==values[key])||!sameHumanization(currentHumanization(),humanization)||$('presetName').value.trim()!==name)throw new Error('保存期间参数已变化，请重新保存');
-  const preset={id:update?selectedPreset:'preset-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8),name,values,humanization,drawLines};
+  if(JSON.stringify(sizing)!==JSON.stringify(notebookSizing()))throw new Error('保存期间松紧或排版方式已变化，请重新保存');
+  const preset={id:update?selectedPreset:'preset-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8),name,values,humanization,drawLines,...sizing};
   const next=update?layoutPresets.map(p=>p.id===selectedPreset?preset:p):[...layoutPresets,preset];
   try{storePresets(next,preset.id);}catch(error){throw new Error('浏览器不允许保存预设，请检查浏览器存储设置');}
   layoutPresets=next;selectedPreset=preset.id;deletedPreset=null;renderPresets();notice(update?'当前预设已更新':'新预设已保存，刷新后仍可使用');
@@ -303,10 +444,12 @@ function renderFontMix(){
     const probability=document.createElement('span');probability.className='font-probability';
     const remove=document.createElement('button');remove.className='text-button font-remove';remove.type='button';remove.textContent='×';remove.setAttribute('aria-label','移除 '+font.name);
     remove.onclick=()=>{selectedFonts=selectedFonts.filter(f=>f!==selected);invalidate();renderFontMix();};
-    row.append(name,weight,probability,remove);$('fontMix').append(row);
+    const sample=document.createElement('div');sample.className='font-sample font-mix-sample';sample.dataset.fontPreview=font.id;sample.textContent='加载字形…';
+    row.append(name,weight,probability,remove,sample);$('fontMix').append(row);
   }
   if(!selectedFonts.length){const empty=document.createElement('p');empty.className='hint';empty.textContent='从上方添加至少一种字体。';$('fontMix').append(empty);}
   updateProbabilities();
+  window.FontBrowser?.refreshSelected();
 }
 function renderFontUsage(metadata){
   $('fontUsage').replaceChildren();
@@ -326,12 +469,26 @@ function filterFonts(){
   }
   if([...$('font').options].some(o=>o.value===selected))$('font').value=selected;
   updateProbabilities();
+  window.FontBrowser?.refresh();
 }
 async function loadPorts(){
-  const result=await api('/api/ports');const old=$('port').value;$('port').replaceChildren();
-  for(const port of result.ports){const option=document.createElement('option');option.value=port.device;option.textContent=port.device+' · '+port.description;$('port').append(option);}
+  const [result,saved]=await Promise.all([api('/api/ports'),api('/api/device-profiles')]);
+  deviceProfiles=saved.profiles;const old=state.connected?state.port:$('port').value;$('port').replaceChildren();
+  for(const port of result.ports){const option=document.createElement('option');option.value=port.device;option.dataset.description=port.description||'';$('port').append(option);}
   if(result.ports.some(p=>p.device===old))$('port').value=old;
   else if(result.ports.some(p=>p.device==='COM5'))$('port').value='COM5';
+  if(state.connected&&!result.ports.some(p=>p.device===state.port)){const option=document.createElement('option');option.value=state.port;$('port').append(option);$('port').value=state.port;}
+  // The previous UI defaulted to COM5. Migrate its browser-wide saved axes
+  // once; newly selected ports always start with their own settings.
+  const legacyPort=state.connected?state.port:($('port').value==='COM5'?'COM5':'');
+  let legacySaved=false;try{legacySaved=!!localStorage.getItem('plotter.coordinates.v1');}catch(error){}
+  if(!profileLoaded&&legacyPort&&!deviceProfiles[legacyPort]&&(state.connected||legacySaved)){
+    restoreCoordinateSettings();
+    const draft=captureDeviceProfile(legacyPort);
+    if(state.device_control)draft.device_control=state.device_control;
+    deviceProfiles[legacyPort]=(await api('/api/device-profiles',draft)).profile;
+  }
+  if(!profileLoaded||profilePort!==$('port').value){applyDeviceProfile($('port').value);profileLoaded=true;}else renderDeviceNames();
 }
 async function load(){
   const result=await api('/api/fonts');fonts=result.fonts;filterFonts();
@@ -341,6 +498,7 @@ async function load(){
   if(!fontPresetsLoaded)restoreFontPresets();
   else renderFontPresets();
   renderFontMix();
+  window.FontBrowser?.start();
   state=await api('/api/state');renderState();await loadPorts();
   await refreshCoordinatePreview();
 }
@@ -357,7 +515,7 @@ function renderSourcePages(){
   $('removePage').disabled=sourcePages.length===1;$('addPage').disabled=sourcePages.length>=100;updateCount();
 }
 function selectSource(index){sourcePages[sourceIndex]=$('text').value;sourceIndex=index;renderSourcePages();}
-function captureMode(){return {values:currentLayout(),humanization:currentHumanization(),drawLines:$('gridDrawLines').checked,selectedPreset};}
+function captureMode(){return {values:currentLayout(),humanization:currentHumanization(),drawLines:$('gridDrawLines').checked,selectedPreset,...notebookSizing()};}
 function setMode(mode){
   if(!['notebook','grid'].includes(mode))return;
   if(layoutMode)modeDrafts[layoutMode]=captureMode();
@@ -368,11 +526,13 @@ function setMode(mode){
   const draft=modeDrafts[mode];
   if(draft){
     for(const key of layoutFields)$(key).value=draft.values[key];
+    restoreNotebookSizing(draft);
     setHumanization(draft.humanization);$('gridDrawLines').checked=draft.drawLines;
     if([...builtinPresets,...layoutPresets].some(p=>p.id===draft.selectedPreset))selectedPreset=draft.selectedPreset;
     $('presetName').value=layoutPresets.find(p=>p.id===selectedPreset)?.name||'';renderPresets();
   }
   $('gridOptions').hidden=mode!=='grid';$('notebookOptions').hidden=mode!=='notebook';
+  sizingPanel.hidden=mode!=='notebook';
   for(const key of ['size','spacing'])$(key).closest('label').hidden=mode==='grid';
   $('modeHint').textContent=mode==='grid'?'表格模式：普通字符逐格居中，公式占连续多格；预设与笔记模式独立。':'笔记模式：按宽度换行，支持中文标点留白与公式；预设与表格模式独立。';
   try{localStorage.setItem('plotter.layout-mode.v1',mode);}catch(error){/* Mode remains usable without storage. */}
@@ -394,7 +554,7 @@ function showOutputPage(index){
   axisRevision++;clearTimeout(axisTimer);displayPaper(page.svg,m);renderOutputNavigation();
   $('previewStatus').textContent=m.empty?'本页为空白页，可下载；不会发送书写任务。':`第 ${index+1} 页路径已生成${startedJobs.has(page.job_id)?'，已提交过该页任务':''}。下载与写入使用同一份路径。`;
   $('metrics').replaceChildren();
-  for(const value of [`${m.lines.length} 行 · ${m.strokes} 笔画`,`${m.formula_count||0} 个公式 · ${m.commands} 条指令`,`${m.xy_mm} mm 路程`]){const span=document.createElement('span');span.textContent=value;$('metrics').append(span);}
+  for(const value of [`${m.lines.length} 行 · ${m.strokes} 笔画`,`${m.formula_count||0} 个公式 · ${m.commands} 条指令`,`${m.xy_mm} mm 路程`,`绘图 ${m.feed} / 移动 ${m.move_feed??3000} mm/min`]){const span=document.createElement('span');span.textContent=value;$('metrics').append(span);}
   renderFontUsage(m);renderState();
 }
 function saveBlob(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
@@ -404,6 +564,7 @@ $('preview').onclick=()=>action(async()=>{
   sourcePages[sourceIndex]=$('text').value;
   const data={...paperSettings(),font_mix:selectedFonts.map(f=>({...f})),pages:sourcePages.map(text=>({text})),input_format:$('inputFormat').value};
   for(const key of ['spacing','feed'])data[key]=Number($(key).value);
+  data.move_feed=Number($('moveFeed').value);
   const capturedRevision=revision;
   $('preview').disabled=true;
   try{
@@ -449,7 +610,10 @@ $('documentFile').onchange=()=>action(async()=>{
   let value;try{value=JSON.parse(await file.text());}catch(error){throw new Error('无法读取文档 JSON');}
   if(value.version!==1||!['notebook','grid'].includes(value.layout_mode)||!Array.isArray(value.pages)||!value.pages.length||value.pages.length>100||value.pages.some(p=>typeof p!=='string')||value.pages.reduce((n,p)=>n+p.length,0)>30000||!['auto','fixed'].includes(value.pagination)||!['plain','markdown'].includes(value.input_format)||!validFontCombination(value.font_mix))throw new Error('文档格式或内容无效');
   if(!value.modeDrafts||typeof value.modeDrafts!=='object'||!value.modeDrafts[value.layout_mode])throw new Error('文档缺少当前模式的排版设置');
-  for(const [mode,draft] of Object.entries(value.modeDrafts))if(!['notebook','grid'].includes(mode)||!draft||!validPresetValues(draft.values,mode)||!validHumanization(draft.humanization)||typeof draft.drawLines!=='boolean')throw new Error('文档排版设置无效');
+  for(const [mode,draft] of Object.entries(value.modeDrafts)){
+    if(draft?.values&&typeof draft.values==='object'&&draft.values.moveFeed===undefined)draft.values.moveFeed=3000;
+    if(!['notebook','grid'].includes(mode)||!draft||!validPresetValues(draft.values,mode)||!validNotebookSizing(draft)||!validHumanization(draft.humanization)||typeof draft.drawLines!=='boolean')throw new Error('文档排版设置无效');
+  }
   const c=value.coordinate_system;
   if(!c||!['top-left','top-right','bottom-left','bottom-right'].includes(c.origin)||['reverse_x','reverse_y','swap_xy'].some(k=>typeof c[k]!=='boolean'))throw new Error('文档坐标设置无效');
   if(value.font_mix.some(f=>!fonts.some(font=>font.id===f.font_id)))throw new Error('文档使用的字体在当前服务中不可用，请先配置相同字体目录');
@@ -460,7 +624,7 @@ $('documentFile').onchange=()=>action(async()=>{
 });
 $('refresh').onclick=()=>action(loadPorts);
 $('authenticate').onclick=()=>action(load);
-$('connect').onclick=()=>action(async()=>{state=await api('/api/connect',{port:$('port').value});notice('机器已连接');});
+$('connect').onclick=()=>action(async()=>{await saveDeviceProfile();state=await api('/api/connect',{port:profilePort});$('origin').checked=false;notice('机器已连接，已载入对应设备控制配置');});
 $('disconnect').onclick=()=>action(async()=>{state=await api('/api/disconnect',{});});
 $('check').onclick=()=>action(async()=>{state=await api('/api/check',{job_id:currentJob});notice('原点与机器配置检查通过');});
 $('start').onclick=()=>action(async()=>{const job=currentJob;state=await api('/api/start',{job_id:job,origin_confirmed:$('origin').checked});startedJobs.add(job);if(currentJob===job)currentJob=null;$('origin').checked=false;notice(state.mode==='simulation'?'模拟单页任务开始':'当前页写字任务开始；完成并换纸后再选择下一页');});
@@ -479,17 +643,14 @@ for(const button of document.querySelectorAll('[data-jog-axis]'))button.onclick=
   state=await api('/api/jog',{axis:button.dataset.jogAxis,distance:distance*Number(button.dataset.jogSign),feed});
 });
 $('origin').onchange=renderState;
-for(const key of ['reverseX','reverseY','swapXY','originCorner'])$(key).addEventListener('change',coordinateChanged);
-$('saveCoordinates').onclick=()=>{
-  try{localStorage.setItem('plotter.coordinates.v1',JSON.stringify(coordinateSettings()));notice('坐标设置已保存到当前浏览器');}
-  catch(error){notice('浏览器不允许保存设置，当前设置仍可使用',true);}
-};
+for(const key of ['reverseX','reverseY','swapXY','originCorner','controllerType','penUpZ','penDownZ','penFeed'])$(key).addEventListener('change',coordinateChanged);
+$('saveCoordinates').onclick=()=>action(async()=>{await saveDeviceProfile();notice('坐标与控制设置已保存到当前设备档案');});
 $('resetCoordinates').onclick=()=>{$('reverseX').checked=false;$('reverseY').checked=false;$('swapXY').checked=false;$('originCorner').value='top-left';coordinateChanged();};
 $('addFont').onclick=()=>{
   if(!$('font').value||selectedFonts.length>=16||selectedFonts.some(f=>f.font_id===$('font').value))return;
   selectedFonts.push({font_id:$('font').value,weight:100});invalidate();renderFontMix();
 };
-$('font').onchange=updateProbabilities;
+$('font').onchange=()=>{updateProbabilities();window.FontBrowser?.focus();};
 $('fontSearch').oninput=filterFonts;
 $('fontPreset').onchange=()=>{
   const preset=fontPresets.find(p=>p.id===$('fontPreset').value);
@@ -514,7 +675,9 @@ $('undoFontPreset').onclick=()=>{
   fontPresets=next;deletedFontPreset=null;
   if(usable)applyFontPreset(preset);else renderFontPresets();notice('字体预设已恢复');
 };
-for(const key of ['text','spacing','feed'])$(key).addEventListener('input',invalidate);
+for(const key of ['text','spacing','feed','moveFeed'])$(key).addEventListener('input',invalidate);
+$('lineSizing').onchange=()=>{coordinateChanged();updatePresetHint();};
+$('lineLooseness').addEventListener('input',()=>{coordinateChanged();updatePresetHint();});
 for(const key of ['width','height','marginTop','marginBottom','marginLeft','marginRight','rows','size'])$(key).addEventListener('input',coordinateChanged);
 for(const key of ['punctuationWidth','gridColumns','gridRowGap','gridColumnGap','gridSizePercent','gridPadding'])$(key).addEventListener('input',coordinateChanged);
 $('gridDrawLines').onchange=()=>{coordinateChanged();updatePresetHint();};
@@ -551,7 +714,7 @@ $('undoPreset').onclick=()=>{
   const preset=deletedPreset.preset;layoutPresets=next;deletedPreset=null;applyPreset(preset);notice('预设已恢复');
 };
 async function poll(){
-  try{if(!busy){const capturedAction=actionRevision;const result=await api('/api/state');if(capturedAction===actionRevision&&!busy){state=result;renderState();if(state.error&&state.error!==lastError){lastError=state.error;notice(state.error,true);}}}}
+  try{if(!busy&&!speedSending){const capturedAction=actionRevision;const result=await api('/api/state');if(capturedAction===actionRevision&&!busy&&!speedSending){state=result;renderState();if(state.error&&state.error!==lastError){lastError=state.error;notice(state.error,true);}}}}
   catch(error){
     state={...state,connected:false,phase:'控制端离线，任务状态待确认',operation_type:null,status:'',position:null,pen:'unknown',pen_top:null};
     renderState();
@@ -560,7 +723,6 @@ async function poll(){
   finally{setTimeout(poll,800);}
 }
 renderSourcePages();renderOutputNavigation();
-restoreCoordinateSettings();
 restorePresets();
 try{const savedMode=localStorage.getItem('plotter.layout-mode.v1');if(['notebook','grid'].includes(savedMode))setMode(savedMode);}catch(error){/* First visit asks the user to select a mode. */}
 load().catch(error=>notice(error.message,true)).finally(poll);

@@ -120,6 +120,7 @@ class GFont:
             if codepoint in self.index:raise ValueError(f'Duplicate character U+{codepoint:04X}')
             self.index[codepoint]=entry
         self._metrics=None
+        self._cjk_metrics=None
 
     def close(self):
         self.archive.close()
@@ -153,7 +154,21 @@ class GFont:
 
     def missing(self,text):return sorted(set(c for c in text if not c.isspace() and ord(c) not in self.index))
 
-    def text(self,text,height=5.0,origin=(0.0,0.0),spacing=None,line_pitch=None):
+    @property
+    def cjk_metrics(self):
+        """A Chinese em box, independent of a font's smaller Latin capitals."""
+        if self._cjk_metrics is None:
+            bounds=[self.glyph(c).bounds for c in '国田日目中永你好字体写字机'
+                    if ord(c) in self.index and self.glyph(c).bounds[3]>self.glyph(c).bounds[1]]
+            if bounds:
+                top=min(b[1] for b in bounds)
+                self._cjk_metrics=dict(reference_height=max(b[3] for b in bounds)-top,
+                                       reference_top=top,reference_source='CJK em bounds')
+            else:
+                self._cjk_metrics=self.metrics
+        return self._cjk_metrics
+
+    def text(self,text,height=5.0,origin=(0.0,0.0),spacing=None,line_pitch=None,*,reference_metrics=None):
         """Return millimetre strokes with uniform scale and shared baseline.
 
         Advances are inferred from ink bounds; original metadata advances have
@@ -161,8 +176,9 @@ class GFont:
         """
         missing=self.missing(text)
         if missing:raise ValueError('Missing characters: '+''.join(missing))
-        scale=height/self.metrics['reference_height']
-        top=self.metrics['reference_top']
+        reference=self.metrics if reference_metrics is None else reference_metrics
+        scale=height/reference['reference_height']
+        top=reference['reference_top']
         spacing=height*0.18 if spacing is None else spacing
         line_pitch=height*1.6 if line_pitch is None else line_pitch
         ox,oy=origin;x,y=ox,oy;result=[]

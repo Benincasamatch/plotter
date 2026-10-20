@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
         };
         server.Get("/v1/state",handle([&](const auto&,const auto&) {return controller.state(true);}));
         server.Get("/v1/ports",handle([&](const auto&,const auto&) {return controller.ports();}));
-        server.Post(R"(/v1/control/(connect|disconnect|check|start|pause|resume|stop|jog|pen|manual-pause|manual-stop))",
+        server.Post(R"(/v1/control/(connect|disconnect|check|start|pause|resume|stop|speed|jog|pen|manual-pause|manual-stop))",
                     handle([&](const auto& req,const auto& data) {return controller.call(req.matches[1].str(),data);}));
         server.Post(R"(/v1/jobs/([a-f0-9]{32})/(begin|chunk|seal))",
                     handle([&](const auto& req,const auto& data) {return controller.upload(req.matches[1].str(),req.matches[2].str(),data);}));

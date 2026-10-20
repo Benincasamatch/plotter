@@ -19,6 +19,7 @@ a token of at least 16 characters. Host must match the listener or an explicit
 | POST | `/v1/control/pause` | `{}` |
 | POST | `/v1/control/resume` | `{}` |
 | POST | `/v1/control/stop` | `{}` |
+| POST | `/v1/control/speed` | `{"job_id":"current-job-id","percent":80}` |
 | POST | `/v1/control/jog` | `{"axis":"X","distance":1,"feed":300}` |
 | POST | `/v1/control/pen` | `{"position":"up"}` or `"down"` |
 | POST | `/v1/control/manual-pause` | `{}` |
@@ -29,6 +30,16 @@ Control responses are snapshots with `protocol_version:1`, `controller:"cpp"`,
 `total`, `status`, `position`, `pen`, `pen_top`, `motion_revision`, `last_action`
 and `error`. Positions come from controller MPos, not a pen sensor. Progress
 counts acknowledged commands; it is not physical path completion.
+
+Connect optionally accepts `device_control`, for example
+`{"port":"COM5","device_control":{"controller_type":"grbl","pen_up":-1.25,"pen_down":-3.5,"pen_feed":200}}`.
+Supported types are `kenjoy-grbl` (the original firmware/settings checks) and
+`grbl` (no original-model firmware/direction/steps-per-mm requirement).
+Omitted settings preserve the original type, Z0/Z10 and manual feed 600.
+Z values must be finite within -300..300 mm, differ by at least 0.01 mm;
+manual feed is 100..3000 mm/min. Values require physical device calibration.
+Connection does not send motion. State includes the active `device_control`.
+Control type and Z settings change only on a new connection.
 
 Phases include `disconnected`, `idle`, `manual`, `manual_stopping`, `running`,
 `paused`, `draining`, `complete`, `stopping`, `stopped`, `failed`. The serial
@@ -63,18 +74,25 @@ matches the current task. An older or restarted-process consumed ID is rejected;
 it is never replayed. There is no automatic resume or command replay after a
 timeout. A new task requires a new ID and renewed origin confirmation.
 
-Only the generator's explicit header (`G21`, `G90`, `G94`, `G1 Z0 F3000`,
-`G92 X0 Y0`), bounded `G1 X... Y... F...` / `G1 Z0|10 F...` moves, and the
-final Z0 / X0 Y0 return are accepted. Arbitrary GRBL settings, unlock, homing,
+Execution metadata may include `device_control` and `device_port`. Z moves
+must match the two configured positions; start rejects a mismatch with the
+connected device settings or port. Old metadata retains the default Z0/Z10.
+
+Only the generator's explicit header (`G21`, `G90`, `G94`, `G1 Z<up> F3000`,
+`G92 X0 Y0`), bounded `G1 X... Y... F...` / configured Z moves (100..12000
+mm/min), and the final configured pen-up / X0 Y0 return are accepted.
+Arbitrary GRBL settings, unlock, homing,
 and raw G-code execution endpoints are not provided.
 
 ## Failure and lifetime
 
 An accepted task survives browser/backend loss because its complete file is
 local. Serial errors/alarms stop further commands and request hold. Task stop
-requests hold plus reset and closes the port. No automatic lift or origin return
-occurs after failure/stop. Normal completion waits for physical Idle and checks
-MPos against G92 XY and Z0.
+waits for physical hold, resets the controller, verifies coordinates, raises the
+pen to its configured up position, then returns to the task XY origin. Return
+can be cancelled; faults or failed position checks prevent further return
+motion. Failure does not blindly lift or return. Normal completion waits for
+physical Idle and checks MPos against the task XY origin and configured up Z.
 
 401 indicates authentication failure, 403 an untrusted Host/Origin, 400 invalid
 JSON/schema, 409 a conflicting state/device/upload condition, 413 oversized

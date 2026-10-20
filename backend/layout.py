@@ -6,6 +6,10 @@ from backend.gfont import GFont
 from backend.mixing import layout_mixed
 from backend.coordinates import Coordinates, paper_svg
 from backend.humanization import settings as humanization_settings, active as humanization_active
+from backend.wrapping import preferred_space
+from backend.device_profiles import control_settings
+
+MAX_FEED = 12000
 
 
 def number(data, key, default, low, high):
@@ -57,7 +61,8 @@ def generate(font_path, data, font_choices=None):
         raise ValueError('文字包含控制字符')
     width, height, margins, size, rows, pitch, usable = output_settings(data)
     spacing = number(data, 'spacing', size * .18, 0, 10)
-    feed = number(data, 'feed', 1800, 100, 3000)
+    feed = number(data, 'feed', 1800, 100, MAX_FEED)
+    move_feed = number(data, 'move_feed', 3000, 100, MAX_FEED)
     coordinates = Coordinates.from_data(data, width, height)
     humanization = humanization_settings(data)
     mix_metadata = {}
@@ -87,8 +92,8 @@ def generate(font_path, data, font_choices=None):
                     else:
                         if not line or measure(char) > usable:
                             raise ValueError('单个字符超过纸张宽度，请减小字号')
-                        split = line.rfind(' ')
-                        if split > 0 and char != ' ':
+                        split = preferred_space(list(line), char)
+                        if split > 0:
                             lines.append(line[:split].rstrip())
                             line = line[split + 1:] + char
                             while measure(line) > usable:
@@ -116,24 +121,29 @@ def generate(font_path, data, font_choices=None):
     machine_points = [point for stroke in paths for point in stroke]
     machine_bounds = [min(x for x, y in machine_points), min(y for x, y in machine_points),
                       max(x for x, y in machine_points), max(y for x, y in machine_points)]
-    commands = ['G21', 'G90', 'G94', 'G1 Z0 F3000', 'G92 X0 Y0']
+    control = control_settings(data.get('device_control'))
+    up, down = control['pen_up'], control['pen_down']
+    commands = ['G21', 'G90', 'G94', f'G1 Z{up:g} F3000', 'G92 X0 Y0']
     last = (0, 0); travel = draw = 0.
     for stroke in paths:
         x, y = stroke[0]; travel += math.dist(last, stroke[0])
-        commands += ['G1 Z0 F3000', f'G1 X{x:.3f} Y{y:.3f} F3000', 'G1 Z10 F3000']
+        commands += [f'G1 X{x:.3f} Y{y:.3f} F{move_feed:g}', f'G1 Z{down:g} F{move_feed:g}']
         commands += [f'G1 X{x:.3f} Y{y:.3f} F{feed:g}' for x, y in stroke[1:]]
         draw += sum(math.dist(a, b) for a, b in zip(stroke, stroke[1:]))
-        commands.append('G1 Z0 F3000'); last = stroke[-1]
+        commands.append(f'G1 Z{up:g} F{move_feed:g}'); last = stroke[-1]
     travel += math.dist(last, (0, 0))
-    commands += ['G1 Z0 F3000', 'G1 X0 Y0 F3000']
+    commands += [f'G1 Z{up:g} F3000', 'G1 X0 Y0 F3000']
     gcode = '\n'.join(commands) + '\n'
     metadata = dict(font=pathlib.Path(font_path).name, paper=[width, height], margins=margins, margin=data.get('margin', 30), rows=rows,
                     writable=[usable, height-margins['top']-margins['bottom']],
-                    size=size, pitch=pitch, spacing=spacing, feed=feed, text=text, lines=lines,
+                    size=size, pitch=pitch, spacing=spacing, feed=feed, move_feed=move_feed, text=text, lines=lines,
                     bounds=bounds, machine_bounds=machine_bounds, strokes=len(paths), points=len(points), commands=len(commands),
                     xy_mm=round(travel + draw, 1), metrics=metrics,
                     sha256=hashlib.sha256(gcode.encode('ascii')).hexdigest())
     metadata.update(mix_metadata)
     metadata['humanization'] = humanization
+    metadata['device_control'] = control
+    if data.get('device_port'):
+        metadata['device_port'] = data['device_port']
     metadata.update(coordinates.metadata())
     return dict(metadata=metadata, gcode=gcode, svg=paper_svg(coordinates, margins, paper_paths, rows=rows, pitch=pitch, size=size), paths=paths)

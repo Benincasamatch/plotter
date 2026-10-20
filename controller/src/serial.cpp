@@ -1,4 +1,5 @@
 #include "serial.hpp"
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -117,17 +118,26 @@ class Simulation final : public Serial {
     std::queue<std::string> replies;
     double position[3]{}, offset[3]{};
     bool hold = false;
+    int feed_override = 100;
     static std::string xyz(const double* v) {
         char b[128]; std::snprintf(b, sizeof(b), "%.3f,%.3f,%.3f", v[0], v[1], v[2]); return b;
     }
 public:
     void write(const std::string& raw) override {
         std::lock_guard<std::mutex> lock(mutex);
+        if (raw.size() == 1) {
+            auto code = static_cast<unsigned char>(raw[0]);
+            if (code >= 0x90 && code <= 0x94) {
+                feed_override = code == 0x90 ? 100 : std::clamp(feed_override +
+                    (code == 0x91 ? 10 : code == 0x92 ? -10 : code == 0x93 ? 1 : -1),10,200);
+                return;
+            }
+        }
         if (raw == "!") { hold = true; return; }
         if (raw == "~") { hold = false; return; }
         if (raw == "\x18") { hold = false; replies={}; offset[0]=offset[1]=offset[2]=0; replies.push("Grbl 1.3a.20221114 ['$' for help]"); return; }
         if (raw == "\x85") { hold = false; return; }
-        if (raw == "?") { replies.push("<" + std::string(hold ? "Hold:0" : "Idle") + "|MPos:" + xyz(position) + "|FS:0,0>"); return; }
+        if (raw == "?") { replies.push("<" + std::string(hold ? "Hold:0" : "Idle") + "|MPos:" + xyz(position) + "|FS:0,0|Ov:" + std::to_string(feed_override) + ",100,100>"); return; }
         if (raw == "$I\n") replies.push("[VER:1.3a.20221114:simulation]");
         else if (raw == "$G\n") replies.push("[GC:G1 G54 G17 G21 G90 G94 M5]");
         else if (raw == "$#\n") {

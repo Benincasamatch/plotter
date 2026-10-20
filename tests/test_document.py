@@ -18,6 +18,27 @@ from scripts.generate_demo_font import glyph_record
 
 
 class DocumentTests(unittest.TestCase):
+    def test_pending_controller_upgrade_blocks_only_new_jobs(self):
+        with test_temp() as temp:
+            app = Application(FONT_DIR, temp, controller=TestController())
+            flag = pathlib.Path(temp) / '.speed-limit-update-pending'
+            flag.touch()
+            with self.assertRaisesRegex(ValueError, '更新速度上限'):
+                app.api('/api/start', dict(origin_confirmed=True))
+            self.assertTrue(app.api('/api/state')['speed_limit_update_pending'])
+            flag.unlink()
+            self.assertFalse(app.api('/api/state')['speed_limit_update_pending'])
+
+    def test_speed_limit_matches_single_page_and_document(self):
+        from backend.layout import generate
+        for feed in (100, 3000, 10000, 12000):
+            for result in (generate(FONT, dict(text='AB', feed=feed)), self.generate(feed=feed)[0]):
+                self.assertEqual(result['metadata']['feed'], feed)
+                self.assertIn(f' F{feed}\n', result['gcode'])
+        for feed in (99, 12001, float('inf'), True):
+            with self.assertRaises(ValueError): generate(FONT, dict(text='AB', feed=feed))
+            with self.assertRaises(ValueError): self.generate(feed=feed)
+
     def data(self, **extra):
         return dict(layout_mode='notebook', width=100, height=100, margin=10, rows=4,
                     size=5, spacing=.5, seed='document-test', text='AB', **extra)

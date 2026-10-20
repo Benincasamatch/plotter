@@ -137,7 +137,7 @@ class SplitIntegrationTests(unittest.TestCase):
             self.assertEqual(json.load(r)['ports'][0]['device'], 'SIMULATOR')
         with self.call('/api/connect', {'port': 'SIMULATOR'}):
             pass
-        with self.call('/api/preview', dict(font_id=next(iter(self.app.fonts)), text='Hello world! ' * 8, seed='split')) as r:
+        with self.call('/api/preview', dict(font_id=next(iter(self.app.fonts)), text='Hello world! ' * 8, seed='split', feed=12000, move_feed=12000)) as r:
             preview = json.load(r)
         job_id = preview['job_id']
         with self.call('/api/jobs/' + job_id + '/gcode') as r:
@@ -146,14 +146,32 @@ class SplitIntegrationTests(unittest.TestCase):
             pass
         with self.call('/api/start', dict(job_id=job_id, origin_confirmed=True)):
             pass
+        with self.call('/api/state') as r:
+            eta = json.load(r)['eta']
+            self.assertIsNotNone(eta['remaining_seconds'])
+            self.assertGreater(eta['remaining_seconds'], 0)
         with self.call('/api/pause', {}) as r:
-            self.assertEqual(json.load(r)['phase'], 'paused')
+            paused = json.load(r)
+            self.assertEqual(paused['phase'], 'paused')
+            self.assertEqual(paused['eta']['status'], 'paused')
+            self.assertIsNone(paused['eta']['estimated_finish_at'])
+        with self.call('/api/speed', dict(percent=63, job_id=job_id)) as r:
+            self.assertEqual(json.load(r)['feed_override_requested'], 63)
+        deadline = time.monotonic() + 5
+        while self.client.snapshot()['feed_override'] != 63:
+            self.assertLess(time.monotonic(), deadline, 'Speed feedback timed out')
+            time.sleep(.02)
+        self.assertEqual(self.client.snapshot()['phase'], 'paused')
+        with self.assertRaises(urllib.error.HTTPError):
+            self.call('/api/speed', dict(percent=201, job_id=job_id))
         with self.assertRaises(urllib.error.HTTPError):
             self.call('/api/jog', dict(axis='X', distance=1, feed=300))
         with self.call('/api/resume', {}):
             pass
         state = self.wait('complete')
         self.assertEqual(state['acknowledged'], preview['metadata']['commands'])
+        with self.call('/api/state') as r:
+            self.assertEqual(json.load(r)['eta']['remaining_seconds'], 0)
         folder = pathlib.Path(self.temp.name) / 'device' / job_id
         self.assertEqual((folder / 'job.gcode').read_bytes(), downloaded)
         self.assertEqual(hashlib.sha256(downloaded).hexdigest(), preview['metadata']['sha256'])

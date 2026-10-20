@@ -74,7 +74,7 @@ class Coordinates:
         return '\n'.join(parts)
 
 
-def paper_svg(coordinates, margin, paths=(), rows=None, pitch=None, size=5):
+def paper_svg(coordinates, margin, paths=(), rows=None, pitch=None, size=5, row_guides=None):
     width, height = coordinates.width, coordinates.height
     margins = margin if isinstance(margin, dict) else dict.fromkeys(('left', 'right', 'top', 'bottom'), margin)
     left, top = margins['left'], margins['top']
@@ -84,9 +84,8 @@ def paper_svg(coordinates, margin, paths=(), rows=None, pitch=None, size=5):
              f'<rect width="{width}" height="{height}" fill="white" stroke="#c3ced4" stroke-width=".4"/>',
              f'<rect id="writable-area" x="{left}" y="{top}" width="{right-left}" height="{bottom-top}" fill="none" stroke="#c3ced4" stroke-width=".3" stroke-dasharray="2 2"/>']
     if rows is not None:
-        parts.append('<g id="row-guides" stroke="#dce5dc" stroke-width=".25" stroke-dasharray="1 2">')
-        for row in range(rows):
-            y = top + row * pitch + size
+        parts.append('<g id="row-guides" stroke="#dce5dc" stroke-width=".25">')
+        for y in (row_guides if row_guides is not None else [top + row * pitch + size for row in range(rows)]):
             parts.append(f'<line x1="{left}" y1="{y}" x2="{right}" y2="{y}"/>')
         parts.append('</g>')
     parts.append('<g id="writing-paths">')

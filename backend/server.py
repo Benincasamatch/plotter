@@ -17,6 +17,9 @@ from backend.layout import generate, coordinate_preview
 from backend.controller_client import ControllerClient, ControllerUnavailable
 from backend.mixing import font_choices
 from backend.document import generate_document, coordinate_preview as document_coordinate_preview
+from backend.eta import TaskETA
+from backend.font_library import FontLibrary
+from backend.device_profiles import DeviceProfiles
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 STATIC = ROOT / 'frontend'
@@ -36,6 +39,9 @@ class Application:
         self.groups = collections.OrderedDict()
         self.documents = {}
         self.lock = threading.Lock()
+        self.eta = TaskETA(self.jobs_dir)
+        self.font_library = FontLibrary(self.fonts)
+        self.device_profiles = DeviceProfiles(self.jobs_dir)
 
     def preview(self, data):
         choices, primary = font_choices(data, self.fonts)
@@ -94,35 +100,48 @@ class Application:
             return self.cache[job_id]
 
     def api(self, path, data=None):
+        if path in ('/api/connect','/api/jog','/api/pen','/api/check') and (self.jobs_dir / '.speed-limit-update-pending').is_file():
+            raise ValueError('控制端将在当前任务结束后更新，请等待更新完成后操作')
         if path == '/api/fonts':
             return dict(fonts=[dict(id=k, name=''.join(c for c in p.stem if ord(c) >= 32 and ord(c) != 127))
                                for k, p in self.fonts.items()])
-        if path == '/api/state': return self.machine.refresh_status()
+        if path == '/api/font-previews': return self.font_library.previews(data)
+        if path == '/api/font-recommendations': return self.font_library.recommendations()
+        if path == '/api/state':
+            state = self.machine.refresh_status()
+            state['speed_limit_update_pending'] = (self.jobs_dir / '.speed-limit-update-pending').is_file()
+            return self.eta.decorate(state)
         if path == '/api/ports':
             return self.machine.ports()
+        if path == '/api/device-profiles':
+            return dict(profiles=self.device_profiles.all()) if data is None else dict(profile=self.device_profiles.save(data))
         if path == '/api/preview': return self.preview(data)
         if path == '/api/coordinate-preview':
             return document_coordinate_preview(data) if 'layout_mode' in data else coordinate_preview(data)
         if path == '/api/connect':
-            return self.machine.connect(data.get('port'))
+            profile = self.device_profiles.all().get(data.get('port'))
+            return self.machine.connect(data.get('port'), profile['device_control']) if profile else self.machine.connect(data.get('port'))
         if path == '/api/disconnect': return self.machine.disconnect()
         if path == '/api/jog': return self.machine.jog(data.get('axis'), data.get('distance'), data.get('feed', 300))
         if path == '/api/pen': return self.machine.set_pen(data.get('position'))
         if path == '/api/manual-pause': return self.machine.cancel_manual()
         if path == '/api/manual-stop': return self.machine.cancel_manual(terminate=True)
-        if path == '/api/stop': return self.machine.stop()
+        if path == '/api/stop': return self.eta.decorate(self.machine.stop())
         if path == '/api/check':
             metadata = self.job(data['job_id'])[1]['metadata'] if data.get('job_id') else {'paper': [210, 297]}
             return self.machine.check_origin(metadata)
         if path == '/api/start':
+            if (self.jobs_dir / '.speed-limit-update-pending').is_file():
+                raise ValueError('控制端将在当前任务结束后更新速度上限，更新完成后可开始新任务')
             if data.get('origin_confirmed') is not True:
                 raise ValueError('请确认纸张方向、机器零坐标和笔的位置')
             folder, result = self.job(data.get('job_id'))
             if result['metadata'].get('empty'):
                 raise ValueError('本页没有可书写内容，请选择其他页面')
-            return self.machine.start(data['job_id'], folder, result)
-        if path == '/api/pause': return self.machine.pause()
-        if path == '/api/resume': return self.machine.resume()
+            return self.eta.decorate(self.machine.start(data['job_id'], folder, result))
+        if path == '/api/pause': return self.eta.decorate(self.machine.pause())
+        if path == '/api/resume': return self.eta.decorate(self.machine.resume())
+        if path == '/api/speed': return self.eta.decorate(self.machine.set_speed(data.get('percent'), data.get('job_id')))
         raise KeyError(path)
 
 
@@ -186,10 +205,12 @@ class Handler(BaseHTTPRequestHandler):
                 if path.startswith('/api/documents/') and path.endswith('/archive'):
                     document_id = path[len('/api/documents/'):-len('/archive')]
                     self.respond(200, self.server.app.archive(document_id), 'application/zip', 'writing-pages.zip'); return
-                if path not in ('/api/fonts', '/api/ports', '/api/state'): raise KeyError(path)
+                if path not in ('/api/fonts', '/api/font-recommendations', '/api/ports', '/api/state', '/api/device-profiles'): raise KeyError(path)
                 self.respond(200, self.server.app.api(path)); return
             files = {'/': ('index.html', 'text/html'), '/app.js': ('app.js', 'text/javascript'), '/style.css': ('style.css', 'text/css')}
             files['/config.js'] = ('config.js', 'text/javascript')
+            files['/notebook-sizing.js'] = ('notebook-sizing.js', 'text/javascript')
+            files['/font-library.js'] = ('font-library.js', 'text/javascript')
             if not self.server.serve_frontend: raise KeyError(path)
             if path not in files: raise KeyError(path)
             name, kind = files[path]
@@ -208,7 +229,7 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             if not isinstance(data, dict): raise ValueError('需要 JSON 对象')
             path = urlsplit(self.path).path
-            if path not in ('/api/preview', '/api/coordinate-preview', '/api/connect', '/api/disconnect', '/api/check', '/api/start', '/api/pause', '/api/resume', '/api/jog', '/api/pen', '/api/manual-pause', '/api/manual-stop', '/api/stop'):
+            if path not in ('/api/preview', '/api/font-previews', '/api/coordinate-preview', '/api/device-profiles', '/api/connect', '/api/disconnect', '/api/check', '/api/start', '/api/pause', '/api/resume', '/api/speed', '/api/jog', '/api/pen', '/api/manual-pause', '/api/manual-stop', '/api/stop'):
                 raise KeyError(path)
             self.respond(200, self.server.app.api(path, data))
         except KeyError: self.respond(404, dict(error='接口不存在'))

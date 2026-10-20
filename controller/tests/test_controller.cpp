@@ -88,6 +88,49 @@ struct Fixture {
         throw std::runtime_error("State timeout: "+c->state().dump());
     }
 };
+void realtime_speed() {
+    Fixture f;
+    rejects([&]{f.c->call("speed",{{"percent",80},{"job_id",f.id}});});
+    f.stage(f.gcode(300)); f.start(); f.c->call("pause",Json::object());
+    auto set_speed = [&](int target) {
+        auto result=f.c->call("speed",{{"percent",target},{"job_id",f.id}});
+        expect(result["feed_override_requested"]==target,"Target speed not recorded");
+        auto deadline=std::chrono::steady_clock::now()+3s;
+        while (std::chrono::steady_clock::now()<deadline) {
+            auto s=f.c->state();
+            if (s["feed_override"]==target) { expect(s["phase"]=="paused","Speed resumed a paused task"); return; }
+            std::this_thread::sleep_for(5ms);
+        }
+        throw std::runtime_error("Speed feedback timeout: "+f.c->state().dump());
+    };
+    for (int target : {10,200,137,53,100}) set_speed(target);
+    for (auto bad : {Json(9),Json(201),Json(50.5),Json(true),Json("80"),Json(nullptr)})
+        rejects([&]{f.c->call("speed",{{"percent",bad},{"job_id",f.id}});});
+    rejects([&]{f.c->call("speed",{{"percent",80},{"job_id","old-job"}});});
+    expect(!f.trace->contains("\x18"),"Speed reset the machine");
+    f.c->call("resume",Json::object());f.wait("complete");
+    f.id=std::string(32,'d'); auto high=f.gcode(300);
+    size_t offset=0;
+    while ((offset=high.find("F1800",offset))!=std::string::npos) { high.replace(offset,5,"F12000");offset+=6; }
+    f.stage(high);f.start();f.c->call("pause",Json::object());
+    expect(f.c->state()["speed_max_percent"]==100,"High speed multiplier exceeds 12000 mm/min");
+    rejects([&]{f.c->call("speed",{{"percent",101},{"job_id",f.id}});});
+    set_speed(80);f.c->call("resume",Json::object());f.wait("complete");
+    rejects([&]{f.c->call("speed",{{"percent",80},{"job_id",f.id}});});
+    f.id=std::string(32,'e');
+    for (size_t p=0;(p=high.find("F12000",p))!=std::string::npos;p+=6) high.replace(p,6,"F10000");
+    f.stage(high);f.start();f.c->call("pause",Json::object());
+    expect(f.c->state()["speed_max_percent"]==120,"10000 base must allow 120 percent");
+    set_speed(120);
+    rejects([&]{f.c->call("speed",{{"percent",121},{"job_id",f.id}});});
+    f.c->call("resume",Json::object());f.wait("complete");
+    // A new job restores the default, including when the previous job was slow.
+    f.id=std::string(32,'b');f.stage(f.gcode(300));f.start();f.c->call("pause",Json::object());set_speed(25);
+    f.c->call("resume",Json::object());f.wait("complete");
+    f.id=std::string(32,'c');f.stage(f.gcode(300));f.start();f.c->call("pause",Json::object());
+    expect(f.c->state()["feed_override_requested"]==100,"New job inherited previous speed");
+    f.c->call("resume",Json::object());f.wait("complete");
+}
 void upload_validation() {
     Fixture f; auto text=f.gcode(); auto m=f.meta(text);
     f.c->upload(f.id,"begin",m); f.c->upload(f.id,"chunk",{{"offset",0},{"content",text}});
@@ -226,9 +269,33 @@ void work_coordinate_offsets() {
       f.stage(f.gcode()); f.start(); f.wait("failed"); }
 }
 }
+void device_control_profiles() {
+    Fixture f;
+    f.c->call("disconnect",Json::object());
+    Json control={{"controller_type","grbl"},{"pen_up",-1.25},{"pen_down",-3.5},{"pen_feed",200}};
+    f.c->call("connect",{{"port","SIMULATOR"},{"device_control",control}});
+    f.c->call("pen",{{"position","up"}});f.wait("idle");
+    expect(f.c->state()["pen_top"]==true,"Custom up Z was not recognized");
+    f.c->call("pen",{{"position","down"}});f.wait("idle");
+    expect(f.trace->contains("$J=G21 G90 G53 Z-3.5 F200\n"),"Custom down Z not sent");
+    expect(f.trace->contains("$J=G21 G90 G53 Z-1.25 F200\n"),"Custom up Z not sent");
+    auto text=f.gcode();
+    for (size_t p=0;(p=text.find("Z10",p))!=std::string::npos;p+=5)text.replace(p,3,"Z-3.5");
+    for (size_t p=0;(p=text.find("Z0",p))!=std::string::npos;p+=6)text.replace(p,2,"Z-1.25");
+    auto meta=f.meta(text);meta["device_control"]=control;meta["device_port"]="SIMULATOR";
+    f.c->upload(f.id,"begin",meta);f.c->upload(f.id,"chunk",{{"offset",0},{"content",text}});f.c->upload(f.id,"seal",Json::object());
+    f.start();f.wait("complete");
+    expect(std::abs(f.c->state()["position"][2].get<double>()+1.25)<.01,"Job did not return to configured up Z");
+    f.id=std::string(32,'b');meta["device_port"]="OTHER";
+    f.c->upload(f.id,"begin",meta);f.c->upload(f.id,"chunk",{{"offset",0},{"content",text}});f.c->upload(f.id,"seal",Json::object());
+    rejects([&]{f.start();});
+    f.c->call("disconnect",Json::object());
+    f.c->call("connect",{{"port","SIMULATOR"}});
+    expect(f.c->state()["device_control"]["pen_up"]==0,"Next machine inherited custom Z");
+}
 int main() {
     try {
-        upload_validation(); checksum_and_bounds(); pause_stop_and_lock(); alarm_and_configuration(); physical_idle_and_manual(); immediate_controls_after_completion(); work_coordinate_offsets(); stop_returns_xyz();
+        realtime_speed(); upload_validation(); checksum_and_bounds(); pause_stop_and_lock(); alarm_and_configuration(); physical_idle_and_manual(); immediate_controls_after_completion(); work_coordinate_offsets(); stop_returns_xyz();device_control_profiles();
         std::cout<<"PASS: upload/hash/bounds, replay/restart, pause/stop/locks, alarm/config/final position, physical Idle/manual/relative origin\n";
     } catch (const std::exception& e) { std::cerr<<"FAIL: "<<e.what()<<'\n'; return 1; }
 }

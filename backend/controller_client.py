@@ -57,8 +57,11 @@ class ControllerClient:
         # on the controller; callers can retry explicitly after a timeout.
         return self.request('control/' + action, {} if data is None else data, timeout=240)
 
-    def connect(self, port):
-        return self.control('connect', {'port': port})
+    def connect(self, port, device_control=None):
+        data = {'port': port}
+        if device_control is not None:
+            data['device_control'] = device_control
+        return self.control('connect', data)
 
     def disconnect(self):
         return self.control('disconnect')
@@ -81,6 +84,9 @@ class ControllerClient:
     def resume(self):
         return self.control('resume')
 
+    def set_speed(self, percent, job_id):
+        return self.control('speed', dict(percent=percent, job_id=job_id))
+
     def check_origin(self, metadata):
         return self.control('check', dict(metadata=metadata))
 
@@ -89,6 +95,10 @@ class ControllerClient:
         # stay on the business backend. Each request has bounded memory usage.
         meta = {key: result['metadata'][key] for key in
                 ('sha256', 'commands', 'machine_paper', 'machine_page_bounds')}
+        if 'device_control' in result['metadata']:
+            meta['device_control'] = result['metadata']['device_control']
+        if 'device_port' in result['metadata']:
+            meta['device_port'] = result['metadata']['device_port']
         base = 'jobs/' + job_id + '/'
         upload = self.request(base + 'begin', meta)
         if not upload['consumed'] and not upload['ready']:

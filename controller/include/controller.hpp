@@ -31,6 +31,8 @@ private:
     std::thread worker;
     std::atomic<bool> busy{false}, stopped{false}, stop_requested{false}, paused{false}, manual_cancel{false};
     Json current;
+    Json device_control = {{"controller_type","kenjoy-grbl"},{"pen_up",0},{"pen_down",10},{"pen_feed",600}};
+    int override_pending = -1; // Protected by tx_mutex; await feedback before another increment.
     std::ofstream log;
     std::chrono::steady_clock::time_point last_poll{};
     void update(const Json& fields);
@@ -49,7 +51,7 @@ private:
     void save(const fs::path& folder);
     fs::path job_path(const std::string& id);
     Json manifest(const fs::path& folder);
-    void validate_job(const fs::path& folder, const Json& meta);
+    double validate_job(const fs::path& folder, const Json& meta);
     void join_finished();
 };
 }
