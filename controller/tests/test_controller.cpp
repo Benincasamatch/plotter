@@ -109,10 +109,24 @@ void physical_idle_and_manual() {
       auto count=f.trace->count(); f.c->call("pen",{{"position","up"}}); expect(f.trace->count()==count+1,"Repeated pen up sent motion");
       f.stage(f.gcode()); f.start(); f.wait("complete"); expect(f.c->state()["position"][0]==1,"Task did not return to its physical origin"); }
 }
+void immediate_controls_after_completion() {
+    Fixture f;
+    for (int i=0;i<12;++i) {
+        f.id=std::string(31,'b')+"0123456789ab"[i];
+        f.stage(f.gcode(1)); f.start();
+        auto end=std::chrono::steady_clock::now()+8s;
+        while (f.c->state()["phase"]!="complete" && std::chrono::steady_clock::now()<end) std::this_thread::yield();
+        expect(f.c->state()["phase"]=="complete","Completion publication timed out");
+        // Do not sleep: the worker can still be persisting its final state.
+        f.c->call("disconnect",Json::object());
+        expect(f.c->state()["phase"]=="disconnected","Disconnect after completion failed");
+        f.c->call("connect",{{"port","SIMULATOR"}});
+    }
+}
 }
 int main() {
     try {
-        upload_validation(); checksum_and_bounds(); pause_stop_and_lock(); alarm_and_configuration(); physical_idle_and_manual();
+        upload_validation(); checksum_and_bounds(); pause_stop_and_lock(); alarm_and_configuration(); physical_idle_and_manual(); immediate_controls_after_completion();
         std::cout<<"PASS: upload/hash/bounds, replay/restart, pause/stop/locks, alarm/config/final position, physical Idle/manual/relative origin\n";
     } catch (const std::exception& e) { std::cerr<<"FAIL: "<<e.what()<<'\n'; return 1; }
 }

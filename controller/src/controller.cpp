@@ -191,7 +191,16 @@ void Controller::wait_idle(bool writing) {
         require(Clock::now() < deadline, "Physical motion completion timeout"); std::this_thread::sleep_for(50ms);
     }
 }
-void Controller::join_finished() { require(!busy, "Another operation is active"); if (worker.joinable()) worker.join(); }
+void Controller::join_finished() {
+    if (busy) {
+        auto snapshot=state();
+        // Terminal motion state can be visible while the worker still saves
+        // its final file and closes the log. Join that cleanup before allowing
+        // the next operation; running/paused/draining work still rejects it.
+        require(snapshot["phase"]=="complete" || snapshot["phase"]=="idle", "Another operation is active");
+    }
+    if (worker.joinable()) worker.join();
+}
 Json Controller::call(const std::string& action, const Json& data) {
     require(data.is_object(), "Expected JSON object");
     // These commands never wait for serial queries or uploads.
