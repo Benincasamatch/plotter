@@ -33,18 +33,28 @@ C++ / controller :8090
 
 ## 字体直接预览与相似组合
 
-字体列表分页直接显示真实笔画样张，支持按名称搜索、修改统一预览文字（1–24 字）；当前候选、已选字体和推荐组合都无需悬停。缺字明确显示方框，不借用其他字体。浏览样张不会生成写字任务或调用机器控制端。
+字体弹窗分为搜索字体、字体排序、字体列表、当前字体的预览、字形推荐五块。电脑使用双栏，手机使用单栏并支持折叠当前预览。列表显示真实单字样张、字形数量及速度评分；单字可修改，右侧试写文字可独立修改。搜索结果中的“预览”按钮同步更新右侧字形、字数、速度与推荐，列表标记“预览中”；手机上自动展开预览。预览不改变已选组合，点击“添加”才加入组合。
+
+字数与速度排序保留全部字体并翻页，按当前字体相似度排序仅显示最接近的六项并排除自身；搜索不改变当前参照字体。字形推荐随当前候选更新，原有组合推荐在“相近笔形 · 变化组合”中展开使用。见[字体选择与右侧预览截图](docs/font-chooser.png)。
+
+服务启动时检查一次 `.gfont` 字库，此后每 24 小时检查一次；字体选择弹窗的“刷新字库”可立即检查，并将下次检查安排在本次检查的 24 小时后。按文件名、大小与 SHA-256 检测新增、删除、重命名或内容变化，有变化时自动在后台重新计算速度评分和相似度（相似近邻保持前六名），无变化时跳过分析。无需重启服务，页面自动更新；“刷新预览”仍仅刷新样张。速度评分为模型估计。
+
+部署时额外运行 `python -m pip install -r requirements-analysis.txt`，并保留 `scripts/analyze_font_similarity.py` 和 `scripts/analyze_font_speed.py`。分析通过独立子进程运行，不访问控制端或创建书写任务；成功结果及检查指纹保存在任务目录的 `.font-analysis/`，重启可复用，无变化时不重新分析。损坏文件会跳过并在界面提示；失败保留上一份结果，修改字体的旧分数不会沿用，可点刷新重试。分析期间再次刷新不会重复启动任务。
+
+字体列表分页显示单字真实笔画样张；当前候选、已选字体和推荐组合使用统一试写文字（1–24 字），无需悬停。缺字明确显示方框，不借用其他字体。浏览样张不会生成写字任务或调用机器控制端。
 
 “相近笔形 · 变化组合”提供 7 套分析推荐，应用后采用 60/25/15 权重，可继续调整并另存字体预设；只影响重新生成的路径。当前报告比较线上 304 个字体文件的 128 个共同常用汉字，以 blood8 真迹系列校准，结合归一化笔画墨迹、路径顺序与抬笔分段，并通过全部共同字核对重复候选。相似评分用于风格比较，不代表同一作者的概率；抽样不能保证每个字都相似。详细组合见 [分析报告](docs/font-similarity-report.md)，[实际笔画对照](docs/font-comparison.png)。
 
-离线更新报告需要 NumPy、Pillow；运行服务仍只依赖 Python 标准库：
+业务 API 使用 Python 标准库；自动分析和离线报告脚本额外需要 NumPy、Pillow。使用启动服务的同一个 Python 安装依赖，然后可以离线更新报告：
 
 ```powershell
+python -m pip install -r requirements-analysis.txt
 python scripts/analyze_font_similarity.py --font-dir ../gcodeFonts --output backend/font_similarity.json --report docs/font-similarity-report.md
+python scripts/analyze_font_speed.py --font-dir ../gcodeFonts
 python scripts/render_font_comparison.py --font-dir ../gcodeFonts
 ```
 
-接口：`POST /api/font-previews` 接收 `{ "font_ids": ["字体编号"], "text": "春风十里" }`（每次最多 12 种），返回 SVG 与缺字列表；`GET /api/font-recommendations` 返回与当前字体文件匹配的分析推荐。字库文件缺失或大小改变时，相应旧推荐自动隐藏，预览仍可使用。
+接口：`POST /api/font-previews` 接收 `{ "font_ids": ["字体编号"], "text": "春风十里" }`（每次最多 12 种），返回 SVG 与缺字列表；`GET /api/font-recommendations` 返回与当前字体文件匹配的分析推荐。`POST /api/font-refresh` 接收 `{}` 并启动后台检查；`GET /api/font-status` 返回检查/分析阶段、是否运行、上次检查与分析时间、下次检查时间、无效文件及错误。已有分析运行时再次刷新会复用同一任务。自动分析结果通过文件内容哈希核对，已删除或已修改字体的旧评分自动隐藏，其他可用字体仍可预览。
 
 每种字体同时显示**速度评分**，支持按评分从快到慢排序。100 代表字库中位水平，分数越高越快（可超过 100）；200 约为参考模型中的两倍速度。统一比较 128 个汉字、5 mm 字高、绘图/移动 3000 mm/min、Z 行程 10 mm，计算落笔路径、笔间及字间空移、抬落笔和简化加减速。每字先与全库同一个字的耗时中位数比较，避免缺字造成虚高；少于 96 个样本字显示“样本较少”。评分是字体相对效率模型，不调整实际速度，也不替代任务 ETA；未模拟拐角减速和串口吞吐。完整排名见 [字体速度评分](docs/font-speed-report.md)。用 `python scripts/analyze_font_speed.py --font-dir ../gcodeFonts` 可离线更新；`--inventory` 与 `--overrides` 用于按线上清单和不同版本的字体副本计算。评分数据独立保存在 `backend/font_speed.json`，接口在每种字体的 `speed` 中返回分数、样本数量、路径长度和平均笔画段数。
 
@@ -117,6 +127,7 @@ $$\int_0^1 x^2 dx = \frac{1}{3}$$
 ```powershell
 git clone https://github.com/QScholar/xieziji.git
 cd xieziji
+python -m pip install -r requirements-analysis.txt
 .\controller\build.ps1
 .\controller\build\plotter-controller.exe --simulate --jobs-dir .\controller-jobs
 ```
@@ -222,12 +233,15 @@ python -m backend.server --host 0.0.0.0 --allow-host 192.168.1.20 --controller-u
 
 ```powershell
 .\controller\build.ps1
+python -m pip install -r requirements-analysis.txt
 python -m unittest discover -v
 ```
 
 或先用 CMake 构建，再运行 Python 测试。测试自动查找 `controller/build/plotter-controller[.exe]`；其他位置可设置 `PLOTTER_CONTROLLER_BINARY`。未找到二进制时，跨进程联调会明确跳过，不能视为完整验收。
 
 C++ 测试覆盖上传完整性、范围校验、去重/重启、暂停/终止/互斥、报警停止发送、配置拒绝、物理 Idle、最终坐标及抬落笔。Python 测试保留原有字体、混排、拟真、布局、坐标与 API 回归，并通过真实模拟 C++ 进程核对下载/上传/串口发送字节完全一致，以及认证和独立前端 CORS。
+
+2026-10-21 字体更新验证：131 项 Python 测试通过，新增字库检查测试覆盖新增/删除、同大小文件替换、损坏字体、失败重试、重启复用、空目录及检查并发。真实浏览器验证三种排序、相似度前六名、搜索结果预览与右侧联动、预览不添加字体、手机折叠及现有组合功能；线上 304 个字体完成分析并验证无变化跳过。相关浏览器脚本为 `tests/test_font_library_ui.cjs` 和 `tests/test_font_updates_ui.cjs`，需要 Node.js、Playwright 及 Microsoft Edge；前者使用用户自备的完整字库，后者使用仓库测试字体，不发送机器控制命令。
 
 2026-10-17 本地 Windows 验证：**79 项 Python 测试通过**，其中包括真实 C++ 模拟进程联调；浏览器验证了两种模式的独立预设、文档 JSON 保存与载入、Markdown 导入、多页预览及表格尺寸。新增文档测试覆盖空白页、超过 8 页的缓存、公式尺寸、标点留白，以及多页 ZIP / 控制端文件 / 模拟串口发送内容的一致性。
 

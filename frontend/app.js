@@ -463,9 +463,9 @@ function renderFontUsage(metadata){
   const note=document.createElement('p');note.className='hint';note.textContent=`${metadata.fallback_characters||0} 个字符因部分字体缺字而重分配。下载及写入使用当前预览；再次生成会重新随机。`;$('fontUsage').append(note);$('fontUsage').hidden=false;
 }
 function filterFonts(){
-  const selected=$('font').value, query=$('fontSearch').value.toLowerCase();
+  const selected=$('font').value;
   $('font').replaceChildren();
-  for(const font of fonts.filter(f=>f.name.toLowerCase().includes(query))) {
+  for(const font of fonts) {
     const option=document.createElement('option');option.value=font.id;option.textContent=font.name;$('font').append(option);
   }
   if([...$('font').options].some(o=>o.value===selected))$('font').value=selected;

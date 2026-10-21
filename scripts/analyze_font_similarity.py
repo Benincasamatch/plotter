@@ -88,6 +88,14 @@ def analyze(font_dir,output,report_path,sample_count=128):
     for code,count in frequency.most_common():
         if chr(code) not in eligible and count>=n*.8:eligible.append(chr(code))
     chars=eligible[:sample_count];s=len(chars)
+    if s<32:
+        # Sparse / English-only libraries stay usable without fabricated similarities.
+        result=dict(version=1, fonts=[dict(f, nearest=[]) for f in fonts], recommendations=[],
+                    sample_text=''.join(dict.fromkeys(POOL))[:sample_count], duplicate_pairs=[], errors=errors,
+                    note='共同汉字样本不足 32 个，暂不计算相似度。')
+        pathlib.Path(output).write_text(json.dumps(result,ensure_ascii=False),encoding='utf8')
+        pathlib.Path(report_path).write_text(result['note'],encoding='utf8')
+        return
     print(f'Indexed {n} fonts; comparing {s} common Chinese characters.',flush=True)
     features=np.zeros((n,s,264),dtype=np.float32)
     points=np.zeros((n,s,32,2),dtype=np.float32)
@@ -129,12 +137,11 @@ def analyze(font_dir,output,report_path,sample_count=128):
     np.fill_diagonal(distance,np.inf)
     anchors=[i for i,f in enumerate(fonts) if f['name'].startswith('blood8真迹') and '_kvenjoy_' in f['name']]
     anchor_pairs=[(i,j) for i,j in itertools.combinations(anchors,2) if np.isfinite(distance[i,j]) and exact[i,j]<.97]
-    if not anchor_pairs:raise ValueError('No nonduplicate blood8 reference pairs available')
     anchor_dist=[float(distance[i,j]) for i,j in anchor_pairs]
-    threshold=float(np.quantile(anchor_dist,.9))
+    threshold=float(np.quantile(anchor_dist,.9)) if anchor_dist else .26882
     scale=max(threshold/-math.log(.82),.01)
     scores=100*np.exp(-distance/scale)
-    print(f'blood8 reference distances {min(anchor_dist):.4f}–{max(anchor_dist):.4f}; threshold {threshold:.4f}',flush=True)
+    print(f'Reference pairs {len(anchor_pairs)}; threshold {threshold:.4f}',flush=True)
     # Verify apparent duplicates on every shared glyph, not just the sample.
     duplicate_candidates=[(i,j) for i,j in itertools.combinations(range(n),2)
                           if common[i,j]>=s*.65 and exact[i,j]>=.995]
@@ -202,19 +209,22 @@ def analyze(font_dir,output,report_path,sample_count=128):
         if i in aliases:info['duplicate_of']=fonts[aliases[i]]['id']
     references=[dict(a=fonts[i]['name'],b=fonts[j]['name'],**pair(i,j)) for i,j in anchor_pairs]
     finite_scores=scores[np.triu(np.isfinite(distance),1)]
+    distribution=list(map(float,np.quantile(finite_scores,[.05,.5,.95]))) if finite_scores.size else [None,None,None]
     result=dict(version=1,font_count=n,sample_text=''.join(chars),reference_family='blood8真迹',reference_pairs=references,
                 metric='0.60 × normalized ink distance + 0.30 × ordered arc-length stroke distance + 0.10 × pen-lift-count difference',
-                calibration=dict(reference_pairs=len(anchor_pairs),reference_distance_min=min(anchor_dist),reference_distance_max=max(anchor_dist),
-                                 recommendation_distance_max=threshold,reference_score_min=round(min(float(scores[i,j]) for i,j in anchor_pairs),1)),
-                score_distribution=dict(zip(('p05','median','p95'),map(float,np.quantile(finite_scores,[.05,.5,.95])))),
+                calibration=dict(reference_pairs=len(anchor_pairs),reference_distance_min=min(anchor_dist,default=None),reference_distance_max=max(anchor_dist,default=None),
+                                 recommendation_distance_max=threshold,reference_score_min=round(min(float(scores[i,j]) for i,j in anchor_pairs),1) if anchor_pairs else None,
+                                 fallback=not bool(anchor_pairs)),
+                score_distribution=dict(zip(('p05','median','p95'),distribution)),
                 fonts=fonts,duplicate_pairs=duplicates,recommendations=suggestions,errors=errors)
     pathlib.Path(output).write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf8')
     lines=['# 字体笔画相似性分析','',f'分析 {n} 个字体文件，抽样 {s} 个常用汉字；以 blood8 真迹系列的 {len(anchor_pairs)} 对非重复变体作为距离参照。',
            '', '评分基于归一化实际笔画的墨迹位置、书写路径顺序和抬笔分段，不代表同一作者的概率。文件名仅用于建立参照组，整个库的近邻搜索使用笔画数据。',
            '',f'推荐阈值采用参照组距离的第 90 百分位：{threshold:.5f}，对应评分 82/100。疑似重复文件对使用全部共同字的原始字形记录复核，发现 {len(duplicates)} 对高度重复/子集关系；不将重复项作为混写变化来源。',
-           '',f'全库有效字体配对的相似评分中位数为 {float(np.median(finite_scores)):.1f}，第 95 百分位为 {float(np.quantile(finite_scores,.95)):.1f}。推荐组合要求三者两两接近，并保留可测得的字形变化。',
+           '',f'全库有效配对评分中位数：{distribution[1]}；第 95 百分位：{distribution[2]}。推荐组合要求三者两两接近，并保留可测得的字形变化。',
            '', '## blood8 真迹参照组','', '| 字体 A | 字体 B | 评分 | 笔画段数一致占比 | 抽样不同字形占比 |','|---|---|---:|---:|---:|']
     for p in references:lines.append(f'| {p["a"]} | {p["b"]} | {p["score"]} | {p["same_stroke_count_pct"]}% | {p["changed_pct"]}% |')
+    if not anchor_pairs:lines+=['','当前字库没有可用参照组，采用已有参照距离阈值 0.26882。']
     lines+=['','从参照样本可见，同系列的字形也会有不同的抬笔分段。风格相似性需要综合墨迹形状、走势和分段来判断；段数一致占比描述字体文件中的实际路径分段。',
             '','## 推荐组合','', '| 组合 | 字体及权重 | 最低相似评分 | 抽样不同字形占比 | 三者共同字 |','|---|---|---:|---:|---:|']
     for g in suggestions:

@@ -20,6 +20,7 @@ from backend.document import generate_document, coordinate_preview as document_c
 from backend.eta import TaskETA
 from backend.font_library import FontLibrary
 from backend.device_profiles import DeviceProfiles
+from backend.font_updates import FontUpdates
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 STATIC = ROOT / 'frontend'
@@ -41,7 +42,13 @@ class Application:
         self.lock = threading.Lock()
         self.eta = TaskETA(self.jobs_dir)
         self.font_library = FontLibrary(self.fonts)
+        self.font_updates = FontUpdates(self.fonts_dir, self.jobs_dir / '.font-analysis', self._publish_fonts)
         self.device_profiles = DeviceProfiles(self.jobs_dir)
+
+    def _publish_fonts(self, library):
+        # Each request gets an immutable font mapping / library generation.
+        self.font_library = library
+        self.fonts = library.fonts
 
     def preview(self, data):
         choices, primary = font_choices(data, self.fonts)
@@ -107,6 +114,8 @@ class Application:
                                for k, p in self.fonts.items()])
         if path == '/api/font-previews': return self.font_library.previews(data)
         if path == '/api/font-recommendations': return self.font_library.recommendations()
+        if path == '/api/font-refresh': return self.font_updates.request()
+        if path == '/api/font-status': return self.font_updates.status()
         if path == '/api/state':
             state = self.machine.refresh_status()
             state['speed_limit_update_pending'] = (self.jobs_dir / '.speed-limit-update-pending').is_file()
@@ -205,7 +214,7 @@ class Handler(BaseHTTPRequestHandler):
                 if path.startswith('/api/documents/') and path.endswith('/archive'):
                     document_id = path[len('/api/documents/'):-len('/archive')]
                     self.respond(200, self.server.app.archive(document_id), 'application/zip', 'writing-pages.zip'); return
-                if path not in ('/api/fonts', '/api/font-recommendations', '/api/ports', '/api/state', '/api/device-profiles'): raise KeyError(path)
+                if path not in ('/api/fonts', '/api/font-status', '/api/font-recommendations', '/api/ports', '/api/state', '/api/device-profiles'): raise KeyError(path)
                 self.respond(200, self.server.app.api(path)); return
             files = {'/': ('index.html', 'text/html'), '/app.js': ('app.js', 'text/javascript'), '/style.css': ('style.css', 'text/css')}
             files['/config.js'] = ('config.js', 'text/javascript')
@@ -231,7 +240,7 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             if not isinstance(data, dict): raise ValueError('需要 JSON 对象')
             path = urlsplit(self.path).path
-            if path not in ('/api/preview', '/api/font-previews', '/api/coordinate-preview', '/api/device-profiles', '/api/connect', '/api/disconnect', '/api/check', '/api/start', '/api/pause', '/api/resume', '/api/speed', '/api/jog', '/api/pen', '/api/manual-pause', '/api/manual-stop', '/api/stop'):
+            if path not in ('/api/preview', '/api/font-refresh', '/api/font-previews', '/api/coordinate-preview', '/api/device-profiles', '/api/connect', '/api/disconnect', '/api/check', '/api/start', '/api/pause', '/api/resume', '/api/speed', '/api/jog', '/api/pen', '/api/manual-pause', '/api/manual-stop', '/api/stop'):
                 raise KeyError(path)
             self.respond(200, self.server.app.api(path, data))
         except KeyError: self.respond(404, dict(error='接口不存在'))
@@ -274,10 +283,12 @@ def main():
             parser.error('前端来源必须为完整 http(s)://主机:端口，不含路径')
     app = Application(args.font_dir, args.jobs_dir, token, ControllerClient(args.controller_url))
     server = create_server(app, args.host, args.port, args.allow_host, args.allow_origin_port, args.frontend_origin, not args.api_only)
+    app.font_updates.start()
     print(f'Plotter backend: http://{args.host}:{server.server_port} | fonts={len(app.fonts)} | controller={args.controller_url}', flush=True)
     try: server.serve_forever()
     except KeyboardInterrupt: pass
     finally:
+        app.font_updates.stop()
         # The independently running controller owns the task lifecycle.
         server.server_close()
 

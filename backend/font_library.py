@@ -40,8 +40,9 @@ def vector_sample(path, text):
 
 
 class FontLibrary:
-    def __init__(self, fonts, report=None, speed_report=None):
+    def __init__(self, fonts, report=None, speed_report=None, fingerprints=None):
         self.fonts=fonts
+        self.fingerprints=fingerprints
         self.lock=threading.Lock()
         self.samples=collections.OrderedDict()
         self.report_path=pathlib.Path(report) if report else pathlib.Path(__file__).with_name('font_similarity.json')
@@ -72,13 +73,20 @@ class FontLibrary:
             results.append(dict(font_id=font_id,**cached))
         return dict(previews=results)
 
+    def matches(self, info):
+        path=self.fonts.get(info.get('id'))
+        try:
+            return bool(path and path.name==info.get('file') and path.stat().st_size==info.get('bytes')
+                        and (self.fingerprints is None or info.get('sha256')==self.fingerprints.get(path.name)))
+        except OSError:
+            return False
+
     def recommendations(self):
         try:speeds=json.loads(self.speed_path.read_text(encoding='utf8'))
         except (OSError,ValueError):speeds={}
         speed_details={}
         for info in speeds.get('fonts',[]):
-            path=self.fonts.get(info.get('id'))
-            if path and path.name==info.get('file') and path.stat().st_size==info.get('bytes'):
+            if self.matches(info):
                 speed_details[info['id']]=info['speed']
         try:data=json.loads(self.report_path.read_text(encoding='utf8'))
         except (OSError,ValueError):
@@ -87,8 +95,7 @@ class FontLibrary:
                         note='当前字库尚无笔画分析结果，仍可预览和手动混选。')
         verified={}
         for info in data.get('fonts',[]):
-            path=self.fonts.get(info.get('id'))
-            if path and path.name==info.get('file') and path.stat().st_size==info.get('bytes'):
+            if self.matches(info):
                 verified[info['id']]=info
         groups=[g for g in data.get('recommendations',[]) if all(f['font_id'] in verified for f in g['mix'])]
         details={key:dict(duplicate_of=info.get('duplicate_of'),nearest=[p for p in info.get('nearest',[]) if p['font_id'] in verified],
