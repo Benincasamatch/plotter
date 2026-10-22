@@ -74,17 +74,19 @@ class LayoutTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '缺少'): generate(FONT, dict(text='A😀'))
     def test_chinese_and_english_sizes_scale_independently(self):
         font = ROOT / 'gcodeFonts' / '方正兰亭超细黑体_kvenjoy_奎享科技.gfont'
-        settings = dict(width=200, height=200, rows=10, size_zh=6, size_en=2)
+        settings = dict(width=200, height=200, rows=10, size=6, latin_size=2)
         def height(text):
             b = generate(font, dict(text=text, **settings))['metadata']['bounds']
             return b[3] - b[1]
         self.assertAlmostEqual(height('国'), 6, delta=.7)
         self.assertAlmostEqual(height('A'), 2, delta=.3)
         mixed = generate(font, dict(text='国A', **settings))['metadata']
-        self.assertEqual(mixed['sizes'], dict(en=2., zh=6.))
+        self.assertEqual((mixed['size'], mixed['latin_size']), (6., 2.))
         self.assertAlmostEqual(mixed['bounds'][3] - mixed['bounds'][1], 6, delta=.7)
         shared = generate(font, dict(text='国A', width=200, height=200, rows=10, size=4))['metadata']
-        self.assertEqual(shared['sizes'], dict(en=4., zh=4.))
+        self.assertEqual((shared['size'], shared['latin_size']), (4., 4.))
+        wider = generate(font, dict(text='A', width=200, height=200, rows=10, size=2, latin_size=6))['metadata']
+        self.assertAlmostEqual(wider['bounds'][3] - wider['bounds'][1], 6, delta=.5)
 
 
 class MachineTests(unittest.TestCase):

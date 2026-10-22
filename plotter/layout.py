@@ -25,10 +25,10 @@ def output_settings(data):
     available_height = height - margins['top'] - margins['bottom']
     if usable <= 0 or available_height <= 0:
         raise ValueError('边距超过纸张可用范围')
-    # `size` is the legacy shared height; it still seeds both scripts when the
-    # per-script overrides are absent.
+    # `size` is the Chinese height (the historical shared height); `latin_size`
+    # defaults to it so older payloads keep one nominal height per script.
     size = number(data, 'size', 5, 2, 20)
-    sizes = dict(en=number(data, 'size_en', size, 2, 20), zh=number(data, 'size_zh', size, 2, 20))
+    sizes = dict(zh=size, en=number(data, 'latin_size', size, 2, 20))
     tallest = max(sizes.values())
     rows = None
     if 'rows' in data:
@@ -47,7 +47,7 @@ def coordinate_preview(data):
     width, height, margins, sizes, rows, pitch, usable = output_settings(data)
     coordinates = Coordinates.from_data(data, width, height)
     metadata = coordinates.metadata()
-    metadata.update(margins=margins, size=max(sizes.values()), sizes=sizes, rows=rows, pitch=pitch,
+    metadata.update(margins=margins, size=sizes['zh'], latin_size=sizes['en'], sizes=sizes, rows=rows, pitch=pitch,
                     humanization=humanization_settings(data),
                     writable=[usable, height-margins['top']-margins['bottom']])
     return dict(svg=paper_svg(coordinates, margins, rows=rows, pitch=pitch, size=max(sizes.values())), metadata=metadata)
@@ -102,7 +102,7 @@ def generate(font_path, data, font_choices=None):
     gcode = '\n'.join(commands) + '\n'
     metadata = dict(font=pathlib.Path(font_path).name, paper=[width, height], margins=margins, margin=data.get('margin', 30), rows=rows,
                     writable=[usable, height-margins['top']-margins['bottom']],
-                    size=size, sizes=sizes, pitch=pitch, spacing=spacing, feed=feed, text=text, lines=lines,
+                    size=sizes['zh'], latin_size=sizes['en'], sizes=sizes, pitch=pitch, spacing=spacing, feed=feed, text=text, lines=lines,
                     bounds=bounds, machine_bounds=machine_bounds, strokes=len(paths), points=len(points), commands=len(commands),
                     xy_mm=round(travel + draw, 1), metrics=metrics,
                     sha256=hashlib.sha256(gcode.encode('ascii')).hexdigest())

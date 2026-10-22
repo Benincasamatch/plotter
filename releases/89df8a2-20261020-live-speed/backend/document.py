@@ -63,9 +63,10 @@ def configuration(data):
     looseness = number(data, 'line_looseness', 2, 1, 4) if sizing is not None else None
     if mode == 'grid' or sizing is not None:
         base.pop('rows', None)
-    requested = number(data, 'size', 5, 2, 20)
-    # Grid cells scale every glyph to the cell, so only notebook mode keeps two heights.
-    ratio = number(data, 'latin_size', requested, 2, 20) / requested if mode == 'notebook' else 1.
+    requested_size = number(data, 'size', 5, 2, 20)
+    # Grid cells scale every glyph to the cell, so the two heights only differ in notebook mode.
+    ratio = (number(data, 'latin_size', requested_size, 2, 20) / requested_size
+             if mode == 'notebook' else 1.)
     if sizing == 'rows':
         base.pop('size', None)
     width, height, margins, size, rows, pitch, usable = output_settings(base)
@@ -75,10 +76,10 @@ def configuration(data):
     if mode == 'notebook':
         if sizing == 'rows':
             pitch = available / rows
-            # The Chinese height stays the reference; English follows the requested ratio.
+            # The Chinese height fills the automatic line box; English keeps the chosen ratio.
             size = pitch / looseness
             latin_size = size * ratio
-            if not 2 <= min(size, latin_size) or max(size, latin_size) > 20:
+            if not 2 <= size <= 20 or not 2 <= latin_size <= 20:
                 raise ValueError('自动字高须使中英文都在 2–20 mm，请调整行数、松紧或上下边距')
             if latin_size > pitch + .001:
                 raise ValueError('英文字高超过行距，请减小英文字高或放宽行间松紧')
