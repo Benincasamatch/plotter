@@ -56,3 +56,5 @@
 脚本校验在线文件哈希、打包哈希、源码树干净，解包后 `compileall`，重启 `Xieziji-Web`，断言线上 HTML 含对话框与提示、`app.js` 含缩放/平移/捏合/复位实现且未新增预览请求、两份样式表都已包含放大规则、固定种子的 `/api/preview` 仍返回路径；控制器 PID、任务号与确认数不变。失败由 `git checkout HEAD` 回滚并重启。
 
 脚本需保存为 UTF-8 with BOM：Windows PowerShell 5.1 无 BOM 时按 ANSI 读取，中文字面量会损坏。
+
+实际执行记录：`Result=UPDATED`，控制器 PID 10168 未变，任务号 `fb5c24e70e7941009eafcf5dbe3a1e3f` 与确认数 10180 未变，COM5 仍连接、Idle、抬笔；固定种子预览返回 14203 字节 SVG / 476 点。线上 8080 浏览器实测：生成 1 页预览后打开放大，读取 158 条路径，滚轮 187%，日志中 `/api/` 请求数不变。
