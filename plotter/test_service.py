@@ -87,6 +87,29 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual((shared['size'], shared['latin_size']), (4., 4.))
         wider = generate(font, dict(text='A', width=200, height=200, rows=10, size=2, latin_size=6))['metadata']
         self.assertAlmostEqual(wider['bounds'][3] - wider['bounds'][1], 6, delta=.5)
+    def test_scoped_fonts_route_each_script_only(self):
+        from plotter.mixing import font_choices
+        zh = ROOT / 'gcodeFonts' / '1111122_kvenjoy_1223.gfont'
+        available = {'zh': zh, 'en': FONT}
+        settings = dict(text='中文 English', width=200, height=200, rows=10, size=5, latin_size=5, seed='scoped')
+        split = [dict(font_id='zh', path=zh, weight=1., scope='zh'),
+                 dict(font_id='en', path=FONT, weight=1., scope='en')]
+        result = generate(FONT, settings, split)['metadata']
+        self.assertEqual([c['scope'] for c in result['font_mix']], ['zh', 'en'])
+        self.assertEqual([c['used'] for c in result['font_mix']], [2, 7])
+        self.assertEqual(result['font_mix'][0]['probabilities'], {'zh': 1.})
+        self.assertEqual(result['fallback_characters'], 0)
+        # Without a scope the entries stay 中英通用 and the routing is unchanged.
+        legacy = [dict(c, path=available[c['font_id']]) for c in
+                  (dict(font_id='zh', weight=1.), dict(font_id='en', weight=1.))]
+        plain = generate(FONT, settings, legacy)['metadata']
+        self.assertEqual({c['scope'] for c in plain['font_mix']}, {'all'})
+        self.assertNotEqual(plain['sha256'], result['sha256'])
+        for mix in ([dict(font_id='en', weight=1., scope='en')], [dict(font_id='zh', weight=1., scope='zh')]):
+            with self.assertRaisesRegex(ValueError, '没有可用的中文字体|没有可用的英文字体'):
+                generate(FONT, settings, [dict(c, path=available[c['font_id']]) for c in mix])
+        with self.assertRaisesRegex(ValueError, '适用范围'):
+            font_choices(dict(font_mix=[dict(font_id='zh', weight=1, scope='klingon')]), available)
 
 
 class MachineTests(unittest.TestCase):

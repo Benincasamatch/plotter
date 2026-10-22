@@ -219,9 +219,28 @@ function restoreCoordinateSettings(){
     $('reverseX').checked=saved.reverse_x;$('reverseY').checked=saved.reverse_y;$('swapXY').checked=saved.swap_xy;$('originCorner').value=saved.origin;
   }catch(error){/* Browser storage may be unavailable. Default coordinates remain usable. */}
 }
+const fontScopes=['all','zh','en'];
+const scopeLabels={all:'中英通用',zh:'仅中文',en:'仅英文'};
+function currentScope(font){return fontScopes.includes(font.scope)?font.scope:'all';}
+// Weights compare only within a script: a Chinese-only font never competes for Latin text.
+function fontScripts(font){
+  const scope=currentScope(font);
+  return scope==='all'?['zh','en']:[scope];
+}
+function scopeProbabilities(){
+  const totals={zh:0,en:0};
+  for(const font of selectedFonts)for(const script of fontScripts(font))
+    totals[script]+=Number.isFinite(font.weight)?font.weight:0;
+  return selectedFonts.map(font=>Object.fromEntries(fontScripts(font)
+    .map(script=>[script,totals[script]>0?font.weight/totals[script]:0])));
+}
+function probabilityText(shares){
+  return fontScopes.filter(scope=>scope!=='all'&&shares[scope]!==undefined)
+    .map(scope=>(scope==='zh'?'中 ':'英 ')+(100*shares[scope]).toFixed(0)+'%').join(' · ');
+}
 function updateProbabilities(){
-  const total=selectedFonts.reduce((sum,f)=>sum+(Number.isFinite(f.weight)?f.weight:0),0);
-  for(const [index,node] of [...$('fontMix').querySelectorAll('.font-probability')].entries())node.textContent=total>0?(100*selectedFonts[index].weight/total).toFixed(1)+'%':'—';
+  const shares=scopeProbabilities();
+  for(const [index,node] of [...$('fontMix').querySelectorAll('.font-probability')].entries())node.textContent=probabilityText(shares[index]||{})||'—';
   $('addFont').disabled=!$('font').value||selectedFonts.length>=16||selectedFonts.some(f=>f.font_id===$('font').value);
   $('preview').textContent=selectedFonts.length>1||$('humanEnabled').checked?'生成 / 重新随机预览 ↗':'生成路径预览 ↗';
   updateFontPresetHint();
@@ -229,7 +248,8 @@ function updateProbabilities(){
 function validFontCombination(mix){
   return Array.isArray(mix)&&mix.length>=1&&mix.length<=16&&new Set(mix.map(f=>f&&f.font_id)).size===mix.length&&
     mix.every(f=>f&&typeof f.font_id==='string'&&f.font_id.length>0&&f.font_id.length<=200&&
-      typeof f.weight==='number'&&Number.isFinite(f.weight)&&f.weight>=0&&f.weight<=1000000)&&mix.some(f=>f.weight>0);
+      typeof f.weight==='number'&&Number.isFinite(f.weight)&&f.weight>=0&&f.weight<=1000000&&
+      (f.scope===undefined||fontScopes.includes(f.scope)))&&mix.some(f=>f.weight>0);
 }
 function missingPresetFonts(preset){return preset.mix.filter(f=>!fonts.some(font=>font.id===f.font_id));}
 function updateFontPresetHint(){
@@ -257,7 +277,7 @@ function applyFontPreset(preset){
     $('fontPreset').value=selectedFontPreset;
     notice('无法载入字体预设，缺少字体：'+missing.map(f=>f.name||f.font_id).join('、')+'。已保留当前组合。',true);return false;
   }
-  selectedFontPreset=preset.id;selectedFonts=preset.mix.map(f=>({font_id:f.font_id,weight:f.weight}));
+  selectedFontPreset=preset.id;selectedFonts=preset.mix.map(f=>({font_id:f.font_id,weight:f.weight,scope:currentScope(f)}));
   $('fontPresetName').value=preset.name;invalidate();renderFontMix();renderFontPresets();return true;
 }
 function restoreFontPresets(){
@@ -286,7 +306,7 @@ function saveFontPreset(update=false){
   if(fontPresets.some(p=>p.name===name&&(!update||p.id!==selectedFontPreset)))throw new Error('已有同名字体预设，请选择后点击“更新字体预设”');
   if(!update&&fontPresets.length>=50)throw new Error('最多保存 50 个字体预设，请先删除不用的预设');
   const preset={id:update?selectedFontPreset:'font-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8),name,
-    mix:selectedFonts.map(f=>({font_id:f.font_id,weight:f.weight,name:fonts.find(font=>font.id===f.font_id).name}))};
+    mix:selectedFonts.map(f=>({font_id:f.font_id,weight:f.weight,scope:currentScope(f),name:fonts.find(font=>font.id===f.font_id).name}))};
   const next=update?fontPresets.map(p=>p.id===selectedFontPreset?preset:p):[...fontPresets,preset];
   try{storeFontPresets(next,preset.id);}catch(error){throw new Error('浏览器不允许保存字体预设，请检查存储设置');}
   fontPresets=next;selectedFontPreset=preset.id;deletedFontPreset=null;renderFontPresets();notice(update?'字体预设已更新':'字体组合与权重已保存，刷新后仍可使用');
@@ -297,12 +317,16 @@ function renderFontMix(){
     const font=fonts.find(f=>f.id===selected.font_id);
     const row=document.createElement('div');row.className='font-mix-row';
     const name=document.createElement('span');name.className='font-mix-name';name.textContent=font.name;name.title=font.name;
+    const scope=document.createElement('select');scope.className='font-scope';scope.setAttribute('aria-label',font.name+' 适用范围');
+    for(const value of fontScopes){const option=document.createElement('option');option.value=value;option.textContent=scopeLabels[value];scope.append(option);}
+    scope.value=currentScope(selected);
+    scope.onchange=()=>{selected.scope=scope.value;invalidate();updateProbabilities();};
     const weight=document.createElement('input');weight.type='number';weight.min='0';weight.max='1000000';weight.step='any';weight.value=selected.weight;weight.setAttribute('aria-label',font.name+' 权重');
     weight.oninput=()=>{selected.weight=weight.value===''?0:Number(weight.value);invalidate();updateProbabilities();};
     const probability=document.createElement('span');probability.className='font-probability';
     const remove=document.createElement('button');remove.className='text-button font-remove';remove.type='button';remove.textContent='×';remove.setAttribute('aria-label','移除 '+font.name);
     remove.onclick=()=>{selectedFonts=selectedFonts.filter(f=>f!==selected);invalidate();renderFontMix();};
-    row.append(name,weight,probability,remove);$('fontMix').append(row);
+    row.append(name,scope,weight,probability,remove);$('fontMix').append(row);
   }
   if(!selectedFonts.length){const empty=document.createElement('p');empty.className='hint';empty.textContent='从上方添加至少一种字体。';$('fontMix').append(empty);}
   updateProbabilities();
@@ -312,7 +336,7 @@ function renderFontUsage(metadata){
   const title=document.createElement('p');title.className='font-usage-title';title.textContent='本次预览的实际字体分布';$('fontUsage').append(title);
   for(const item of metadata.font_mix||[]){
     const row=document.createElement('div');row.className='font-usage-row';
-    const name=document.createElement('span');name.textContent=fonts.find(f=>f.id===item.font_id)?.name||item.font;name.title=name.textContent;
+    const name=document.createElement('span');name.textContent=(fonts.find(f=>f.id===item.font_id)?.name||item.font)+(item.scope&&item.scope!=='all'?`（${scopeLabels[item.scope]}）`:'');name.title=name.textContent;
     const count=document.createElement('span');count.textContent=`${item.used} 字 · ${(100*item.actual_probability).toFixed(1)}%`;row.append(name,count);$('fontUsage').append(row);
   }
   const note=document.createElement('p');note.className='hint';note.textContent=`${metadata.fallback_characters||0} 个字符因部分字体缺字而重分配。下载及写入使用当前预览；再次生成会重新随机。`;$('fontUsage').append(note);$('fontUsage').hidden=false;
@@ -398,7 +422,7 @@ $('saveCoordinates').onclick=()=>{
 $('resetCoordinates').onclick=()=>{$('reverseX').checked=false;$('reverseY').checked=false;$('swapXY').checked=false;$('originCorner').value='top-left';coordinateChanged();};
 $('addFont').onclick=()=>{
   if(!$('font').value||selectedFonts.length>=16||selectedFonts.some(f=>f.font_id===$('font').value))return;
-  selectedFonts.push({font_id:$('font').value,weight:100});invalidate();renderFontMix();
+  selectedFonts.push({font_id:$('font').value,weight:100,scope:$('fontScope').value});invalidate();renderFontMix();
 };
 $('font').onchange=updateProbabilities;
 $('fontSearch').oninput=filterFonts;

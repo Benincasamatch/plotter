@@ -14,12 +14,12 @@ from backend.gfont import GFont
 from backend.humanization import settings as human_settings, active, Variation
 from backend.layout import MAX_FEED, number, output_settings
 from backend.mathtext import Box, items, render, symbol, SYMBOLS
+from backend.mixing import PUNCTUATION, is_cjk, missing_message, normalized, scoped, scope_shares, script_of
 from backend.wrapping import preferred_space
 from backend.device_profiles import control_settings
 
 
 MAX_PAGES = 100
-PUNCTUATION = set('，。！？；：、（）【】《》〈〉「」『』“”‘’…—')
 NO_START = set('，。！？；：、）》〉】」』”’,.;:!?%)]}')
 NO_END = set('（《〈【「『“‘([{')
 SUPERSCRIPT = dict(zip('⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿ', '0123456789+-=()n'))
@@ -29,9 +29,7 @@ ASCII_FALLBACK = {'，':',', '、':',', '。':'.', '！':'!', '？':'?', '；':'
                   '（':'(', '）':')', '【':'[', '】':']', '“':'"', '”':'"', '‘':"'", '’':"'"}
 def cjk_character(char):
     """CJK ideographs, kana-width punctuation and fullwidth forms share the Chinese em box."""
-    code = ord(char)
-    return (0x3000 <= code <= 0x303f or 0x3400 <= code <= 0x9fff or 0xf900 <= code <= 0xfaff or
-            0xff00 <= code <= 0xffef or 0x20000 <= code <= 0x323af or char in PUNCTUATION)
+    return is_cjk(char)
 
 
 PUNCT_PATHS = {
@@ -186,7 +184,7 @@ class Token:
 
 class Glyphs:
     def __init__(self, choices, stack, config, seed):
-        self.choices = [dict(c) for c in choices if c['weight'] > 0]
+        self.choices = [c for c in normalized(choices) if c['weight'] > 0]
         self.fonts = [stack.enter_context(GFont(c['path'])) for c in self.choices]
         self.rng = random.Random(seed)
         self.config = config
@@ -196,9 +194,18 @@ class Glyphs:
         demo = pathlib.Path(__file__).resolve().parents[1] / 'gcodeFonts' / 'demo.gfont'
         self.latin = stack.enter_context(GFont(demo)) if demo.is_file() else None
 
+    def pool(self, char):
+        """Selected fonts allowed to render this character's script."""
+        script = script_of(char)
+        return [i for i, c in enumerate(self.choices) if scoped(c['scope'], script)]
+
     def box(self, char, size, varied=False):
-        options = [i for i, f in enumerate(self.fonts) if ord(char) in f.index]
-        fallback = len(options) < len(self.fonts)
+        pool = self.pool(char)
+        if not pool:
+            # No selected font serves this script; never substitute another script's font.
+            raise ValueError(missing_message([char], {char: pool}))
+        options = [i for i in pool if ord(char) in self.fonts[i].index]
+        fallback = len(options) < len(pool)
         if options:
             index = self.rng.choices(options, weights=[self.choices[i]['weight'] for i in options])[0]
             font, font_id = self.fonts[index], self.choices[index]['font_id']
@@ -221,16 +228,13 @@ class Glyphs:
                 paths = [[(x * size * .5, y * size) for x, y in stroke] for stroke in PUNCT_PATHS[equivalent]]
                 box = Box(size * .5, size * 1.05, size, paths)
             else:
-                raise ValueError('所选字体缺少字符：' + char)
+                raise ValueError(missing_message([char], {char: pool}))
             self.used['builtin-symbols'] += 1; self.fallback += 1
             return box
         self.used[font_id] += 1; self.fallback += int(fallback)
         key = (font_id, char, size)
         if key not in self.cache:
-            code=ord(char)
-            chinese=(0x3400 <= code <= 0x9fff or 0xf900 <= code <= 0xfaff or
-                     0x20000 <= code <= 0x323af or char in PUNCTUATION)
-            reference=font.cjk_metrics if self.config['mode']=='notebook' and chinese else None
+            reference=font.cjk_metrics if self.config['mode']=='notebook' and is_cjk(char) else None
             paths = font.text(char, size, spacing=0, reference_metrics=reference)
             points = [p for s in paths for p in s]
             if not points:
@@ -280,8 +284,10 @@ class Glyphs:
         for token in tokens:
             counts.update(token.fonts)
         total, weight = sum(counts.values()), sum(c['weight'] for c in self.choices)
-        result = [dict(font_id=c['font_id'], font=c['path'].name, weight=c['weight'],
-                       probability=c['weight'] / weight, used=counts[c['font_id']],
+        shares = scope_shares(self.choices)
+        result = [dict(font_id=c['font_id'], font=c['path'].name, weight=c['weight'], scope=c['scope'],
+                       probability=c['weight'] / weight, probabilities=shares[c['font_id']],
+                       used=counts[c['font_id']],
                        actual_probability=counts[c['font_id']] / total if total else 0., metrics=f.metrics)
                   for c, f in zip(self.choices, self.fonts)]
         for font_id, name in [('builtin-latin', '内置单线字母与数字'), ('builtin-symbols', '内置单线数学符号')]:

@@ -223,7 +223,8 @@ window.FontBrowser=(()=>{
   byId('applyFontRecommendation').onclick=()=>{
     const group=catalog?.recommendations?.find(g=>g.id===byId('fontRecommendation').value);if(!group)return;
     if(group.mix.some(m=>!fonts.some(f=>f.id===m.font_id))){notice('组合字体在当前字库不可用，请刷新后重试',true);return;}
-    selectedFonts=group.mix.map(m=>({font_id:m.font_id,weight:m.weight}));selectedFontPreset='';byId('fontPresetName').value=group.name;
+    // Recommendation groups vary stroke style, not script; they stay 中英通用.
+    selectedFonts=group.mix.map(m=>({font_id:m.font_id,weight:m.weight,scope:'all'}));selectedFontPreset='';byId('fontPresetName').value=group.name;
     invalidate();renderFontMix();renderFontPresets();
     notice('组合已应用；重新生成预览后用于下一任务。可点击“另存字体预设”保存。');
   };
