@@ -152,9 +152,15 @@ class HTTPTests(unittest.TestCase):
         self.assertTrue(json.loads(self.call('/api/check',dict(job_id=preview['job_id'])))['connected'])
         with self.assertRaises(urllib.error.HTTPError) as failure:self.call('/api/start',dict(job_id=preview['job_id']))
         self.assertEqual(failure.exception.code,409)
-        self.call('/api/start',dict(job_id=preview['job_id'],origin_confirmed=True))
+        first=json.loads(self.call('/api/start',dict(job_id=preview['job_id'],origin_confirmed=True)))
         self.app.machine.worker.join(10)
         state=json.loads(self.call('/api/state'));self.assertEqual(state['phase'],'complete')
+        # Content stays writable: the same preview runs again from a new origin.
+        second=json.loads(self.call('/api/start',dict(job_id=preview['job_id'],origin_confirmed=True)))
+        self.assertNotEqual(second['job_id'],first['job_id'])
+        self.assertNotEqual(second['job_id'],preview['job_id'])
+        self.app.machine.worker.join(10)
+        self.assertEqual(json.loads(self.call('/api/state'))['phase'],'complete')
         self.call('/api/disconnect',{})
         with self.assertRaises(urllib.error.HTTPError):self.call('/api/start',dict(job_id=preview['job_id'],origin_confirmed=True))
     def test_cross_origin_host_and_path_traversal_rejected(self):

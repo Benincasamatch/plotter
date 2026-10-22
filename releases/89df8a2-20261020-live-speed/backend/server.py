@@ -24,6 +24,8 @@ from backend.font_updates import FontUpdates
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 STATIC = ROOT / 'frontend'
+# Controller phases in which a task is still owned by a single execution id.
+EXECUTING = frozenset({'running', 'paused', 'draining', 'stopping', 'returning'})
 
 
 class Application:
@@ -39,8 +41,20 @@ class Application:
         self.cache = collections.OrderedDict()
         self.groups = collections.OrderedDict()
         self.documents = {}
+        # A preview is immutable content; every start mints a new controller
+        # execution id so the same page can be written again from a new origin.
+        self.executions = collections.OrderedDict()
+        try:
+            saved = json.loads((self.jobs_dir / '.executions.json').read_text(encoding='utf8'))
+            entries = saved.items() if isinstance(saved, dict) else ()
+            self.executions.update((k, v) for k, v in entries
+                                   if isinstance(k, str) and re.fullmatch(r'[a-f0-9]{32}', k)
+                                   and isinstance(v, str) and re.fullmatch(r'[a-f0-9]{32}', v))
+        except (OSError, ValueError):
+            pass
+        self.start_lock = threading.Lock()
         self.lock = threading.Lock()
-        self.eta = TaskETA(self.jobs_dir)
+        self.eta = TaskETA(self.jobs_dir, self.execution_path)
         self.font_library = FontLibrary(self.fonts)
         self.font_updates = FontUpdates(self.fonts_dir, self.jobs_dir / '.font-analysis', self._publish_fonts)
         self.device_profiles = DeviceProfiles(self.jobs_dir)
@@ -106,6 +120,43 @@ class Application:
             if job_id not in self.cache: raise ValueError('预览已过期，请重新生成')
             return self.cache[job_id]
 
+    def execution_path(self, job_id):
+        """G-code for an execution id; previews keep their own file."""
+        if not isinstance(job_id, str) or not re.fullmatch(r'[a-f0-9]{32}', job_id):
+            return None
+        with self.lock:
+            source = self.executions.get(job_id)
+        if source is None:
+            # Survives a backend restart while the controller still executes.
+            try:
+                saved = json.loads((self.jobs_dir / '.executions.json').read_text(encoding='utf8'))
+            except (OSError, ValueError):
+                saved = None
+            candidate = saved.get(job_id) if isinstance(saved, dict) else None
+            source = candidate if isinstance(candidate, str) and re.fullmatch(r'[a-f0-9]{32}', candidate) else None
+        # Unmapped ids are pre-upgrade executions, whose folder is the id itself.
+        return self.jobs_dir / (source or job_id) / 'job.gcode'
+
+    def start_execution(self, preview_id):
+        # Content is reusable; the controller executes a task id only once. Each
+        # start therefore claims a fresh execution id for the same preview, so a
+        # page can be written again after completion, a stop, or a fault.
+        with self.start_lock:
+            state = self.machine.refresh_status()
+            running = state.get('job_id')
+            if isinstance(running, str) and state.get('phase') in EXECUTING:
+                with self.lock:
+                    if self.executions.get(running) == preview_id: return running
+                raise ValueError('已有任务正在执行，请等待完成或终止后再开始')
+            execution = uuid.uuid4().hex
+            with self.lock:
+                self.executions[execution] = preview_id
+                while len(self.executions) > 512: self.executions.popitem(last=False)
+                temp = self.jobs_dir / '.executions.tmp'
+                temp.write_text(json.dumps(dict(self.executions)), encoding='utf8')
+                temp.replace(self.jobs_dir / '.executions.json')
+            return execution
+
     def api(self, path, data=None):
         if path in ('/api/connect','/api/jog','/api/pen','/api/check') and (self.jobs_dir / '.speed-limit-update-pending').is_file():
             raise ValueError('控制端将在当前任务结束后更新，请等待更新完成后操作')
@@ -144,10 +195,12 @@ class Application:
                 raise ValueError('控制端将在当前任务结束后更新速度上限，更新完成后可开始新任务')
             if data.get('origin_confirmed') is not True:
                 raise ValueError('请确认纸张方向、机器零坐标和笔的位置')
-            folder, result = self.job(data.get('job_id'))
+            preview_id = data.get('job_id')
+            folder, result = self.job(preview_id)
             if result['metadata'].get('empty'):
                 raise ValueError('本页没有可书写内容，请选择其他页面')
-            return self.eta.decorate(self.machine.start(data['job_id'], folder, result))
+            execution = self.start_execution(preview_id)
+            return self.eta.decorate(self.machine.start(execution, folder, result))
         if path == '/api/pause': return self.eta.decorate(self.machine.pause())
         if path == '/api/resume': return self.eta.decorate(self.machine.resume())
         if path == '/api/speed': return self.eta.decorate(self.machine.set_speed(data.get('percent'), data.get('job_id')))

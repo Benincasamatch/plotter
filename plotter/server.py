@@ -90,9 +90,14 @@ class Application:
         if path == '/api/start':
             if data.get('origin_confirmed') is not True:
                 raise ValueError('请确认纸张方向、机器零坐标和笔的位置')
-            folder, result = self.job(data.get('job_id'))
-            if (folder / 'state.json').exists(): raise ValueError('此预览已执行，请重新生成后再写')
-            return self.machine.start(data['job_id'], folder, result)
+            _, result = self.job(data.get('job_id'))
+            # Content is reusable; each start is a separate execution folder so
+            # the same preview can be written again after completion or a stop.
+            execution = uuid.uuid4().hex
+            target = self.jobs_dir / execution
+            target.mkdir()
+            (target / 'job.gcode').write_text(result['gcode'], encoding='ascii')
+            return self.machine.start(execution, target, result)
         if path == '/api/pause': return self.machine.pause()
         if path == '/api/resume': return self.machine.resume()
         raise KeyError(path)

@@ -58,7 +58,6 @@ let speedTimer, speedPending=null, speedSending=false, speedJob=null;
 const layoutFields=['width','height','marginTop','marginBottom','marginLeft','marginRight','rows','size','latinSize','spacing','feed','moveFeed','punctuationWidth','gridColumns','gridRowGap','gridColumnGap','gridSizePercent','gridPadding'];
 let presetStorage='plotter.layout-presets.v1';
 let layoutMode='', modeDrafts={}, sourcePages=[$('text').value], sourceIndex=0, documentResult=null, outputIndex=0;
-const startedJobs=new Set();
 const humanFields={vertical:'Vertical',scale:'Scale',rotation:'Rotation',spacing:'Spacing',baseline:'Baseline'};
 const humanDefault={enabled:false,vertical:.3,scale:5,rotation:2,spacing:.2,baseline:.4,
   vertical_enabled:true,scale_enabled:true,rotation_enabled:true,spacing_enabled:true,baseline_enabled:true};
@@ -554,9 +553,10 @@ function renderOutputNavigation(){
 function showOutputPage(index){
   if(!documentResult?.pages[index])return;
   outputIndex=index;const page=documentResult.pages[index],m=page.metadata;
-  currentJob=m.empty||startedJobs.has(page.job_id)?null:page.job_id;downloadJob=page.job_id;$('origin').checked=false;
+  // Content stays writable: every start becomes a new execution of this page.
+  currentJob=m.empty?null:page.job_id;downloadJob=page.job_id;$('origin').checked=false;
   axisRevision++;clearTimeout(axisTimer);displayPaper(page.svg,m);renderOutputNavigation();
-  $('previewStatus').textContent=m.empty?'本页为空白页，可下载；不会发送书写任务。':`第 ${index+1} 页路径已生成${startedJobs.has(page.job_id)?'，已提交过该页任务':''}。下载与写入使用同一份路径。`;
+  $('previewStatus').textContent=m.empty?'本页为空白页，可下载；不会发送书写任务。':`第 ${index+1} 页路径已生成，可重复写入；每次开始都从当前笔位置作为新原点。下载与写入使用同一份路径。`;
   $('metrics').replaceChildren();
   for(const value of [`${m.lines.length} 行 · ${m.strokes} 笔画`,`${m.formula_count||0} 个公式 · ${m.commands} 条指令`,`${m.xy_mm} mm 路程`,`绘图 ${m.feed} / 移动 ${m.move_feed??3000} mm/min`]){const span=document.createElement('span');span.textContent=value;$('metrics').append(span);}
   renderFontUsage(m);renderState();
@@ -575,7 +575,7 @@ $('preview').onclick=()=>action(async()=>{
     const result=await api('/api/preview',data);
     if(capturedRevision!==revision){notice('生成期间内容发生了修改，请重新生成预览');return;}
     if(result.metadata.motion_revision!==undefined){state.motion_revision=result.metadata.motion_revision;observedMotionRevision=result.metadata.motion_revision;}
-    documentResult=result;startedJobs.clear();showOutputPage(0);
+    documentResult=result;showOutputPage(0);
     notice(`已生成 ${result.page_count} 页，可切换预览、逐页写字或下载全部页面`);
   }finally{$('preview').disabled=false;}
 });
@@ -631,10 +631,10 @@ $('authenticate').onclick=()=>action(load);
 $('connect').onclick=()=>action(async()=>{await saveDeviceProfile();state=await api('/api/connect',{port:profilePort});$('origin').checked=false;notice('机器已连接，已载入对应设备控制配置');});
 $('disconnect').onclick=()=>action(async()=>{state=await api('/api/disconnect',{});});
 $('check').onclick=()=>action(async()=>{state=await api('/api/check',{job_id:currentJob});notice('原点与机器配置检查通过');});
-$('start').onclick=()=>action(async()=>{const job=currentJob, page=documentResult?.pages.find(p=>p.job_id===job)?.metadata;state=await api('/api/start',{job_id:job,origin_confirmed:$('origin').checked});window.pageReminders?.remember(state,{device:deviceLabel(state.port),simulation:state.mode==='simulation',page:page?.page_number,pages:page?.page_count});startedJobs.add(job);if(currentJob===job)currentJob=null;$('origin').checked=false;notice(state.mode==='simulation'?'模拟单页任务开始':'当前页写字任务开始；完成并换纸后再选择下一页');});
+$('start').onclick=()=>action(async()=>{const job=currentJob, page=documentResult?.pages.find(p=>p.job_id===job)?.metadata;state=await api('/api/start',{job_id:job,origin_confirmed:$('origin').checked});window.pageReminders?.remember(state,{device:deviceLabel(state.port),simulation:state.mode==='simulation',page:page?.page_number,pages:page?.page_count});$('origin').checked=false;notice(state.mode==='simulation'?'模拟单页任务开始':'当前页写字任务开始；完成后可换纸重新确认原点，再写同一页');});
 $('pause').onclick=()=>realtimeAction(async()=>{state=await api('/api/pause',{});});
 $('resume').onclick=()=>realtimeAction(async()=>{state=await api('/api/resume',{});});
-$('stop').onclick=()=>realtimeAction(async()=>{const returning=state.phase==='returning';state=await api('/api/stop',{});$('origin').checked=false;currentJob=null;notice(returning?'已请求停止回原点；请重新连接并确认位置':'已请求终止；停稳后先抬笔至 Z0，再返回本次 XY 原点');});
+$('stop').onclick=()=>realtimeAction(async()=>{const returning=state.phase==='returning';state=await api('/api/stop',{});$('origin').checked=false;notice(returning?'已请求停止回原点；请重新连接并确认位置':'已请求终止；停稳后先抬笔至 Z0，再返回本次 XY 原点');});
 $('penUp').onclick=()=>action(async()=>{state=await api('/api/pen',{position:'up'});});
 $('penDown').onclick=()=>action(async()=>{state=await api('/api/pen',{position:'down'});});
 $('manualPause').onclick=()=>realtimeAction(async()=>{state=await api('/api/manual-pause',{});});
