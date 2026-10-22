@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from backend.layout import generate, coordinate_preview
 from backend.controller_client import ControllerClient, ControllerUnavailable
 from backend.mixing import font_choices
-from backend.document import generate_document, coordinate_preview as document_coordinate_preview
+from backend.document import generate_document, predict_line_pitch, coordinate_preview as document_coordinate_preview
 from backend.eta import TaskETA
 from backend.font_library import FontLibrary
 from backend.device_profiles import DeviceProfiles
@@ -176,6 +176,10 @@ class Application:
         if path == '/api/device-profiles':
             return dict(profiles=self.device_profiles.all()) if data is None else dict(profile=self.device_profiles.save(data))
         if path == '/api/preview': return self.preview(data)
+        if path == '/api/line-pitch':
+            # Prediction must not create a job: it only reads font metrics.
+            choices, primary = font_choices(data, self.fonts)
+            return predict_line_pitch(data, choices or [dict(font_id='primary', path=primary, weight=100.)])
         if path == '/api/coordinate-preview':
             return document_coordinate_preview(data) if 'layout_mode' in data else coordinate_preview(data)
         if path == '/api/connect':
@@ -293,7 +297,7 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             if not isinstance(data, dict): raise ValueError('需要 JSON 对象')
             path = urlsplit(self.path).path
-            if path not in ('/api/preview', '/api/font-refresh', '/api/font-previews', '/api/coordinate-preview', '/api/device-profiles', '/api/connect', '/api/disconnect', '/api/check', '/api/start', '/api/pause', '/api/resume', '/api/speed', '/api/jog', '/api/pen', '/api/manual-pause', '/api/manual-stop', '/api/stop'):
+            if path not in ('/api/preview', '/api/line-pitch', '/api/font-refresh', '/api/font-previews', '/api/coordinate-preview', '/api/device-profiles', '/api/connect', '/api/disconnect', '/api/check', '/api/start', '/api/pause', '/api/resume', '/api/speed', '/api/jog', '/api/pen', '/api/manual-pause', '/api/manual-stop', '/api/stop'):
                 raise KeyError(path)
             self.respond(200, self.server.app.api(path, data))
         except KeyError: self.respond(404, dict(error='接口不存在'))

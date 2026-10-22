@@ -53,7 +53,12 @@ def integer(data, key, default, low, high):
     return int(value)
 
 
-def configuration(data):
+def configuration(data, strict=True):
+    """Parse layout parameters; `strict=False` skips derived-layout limits.
+
+    The line-pitch prediction runs before the user can pick a looseness that
+    satisfies those limits, so it must still read the requested heights and rows.
+    """
     mode = data.get('layout_mode', 'notebook')
     if mode not in ('notebook', 'grid'):
         raise ValueError('排版模式必须是笔记或表格')
@@ -80,18 +85,19 @@ def configuration(data):
             # The Chinese height fills the automatic line box; English keeps the chosen ratio.
             size = pitch / looseness
             latin_size = size * ratio
-            if not 2 <= size <= 20 or not 2 <= latin_size <= 20:
+            if strict and (not 2 <= size <= 20 or not 2 <= latin_size <= 20):
                 raise ValueError('自动字高须使中英文都在 2–20 mm，请调整行数、松紧或上下边距')
-            if latin_size > pitch + .001:
+            if strict and latin_size > pitch + .001:
                 raise ValueError('英文字高超过行距，请减小英文字高或放宽行间松紧')
         elif sizing == 'size':
             pitch = max(size, latin_size) * looseness
             rows = math.floor((available + .000001) / pitch)
-            if not 1 <= rows <= 200:
+            if strict and not 1 <= rows <= 200:
                 raise ValueError('自动行数须为 1–200 行，请调整字高、松紧或上下边距')
-        elif rows * max(size, latin_size) > available + .001:
-            raise ValueError('指定行数与字大小超过可写高度')
+            rows = max(1, rows)
         else:
+            if strict and rows * max(size, latin_size) > available + .001:
+                raise ValueError('指定行数与字大小超过可写高度')
             pitch = available / rows
     raw = data.get('grid', {})
     if not isinstance(raw, dict):
@@ -344,10 +350,261 @@ def text_width(tokens):
     return sum(t.advance for t in tokens[:-1]) + (tokens[-1].box.width if tokens else 0.)
 
 
+def human_amplitude(human, key):
+    """Enabled variation amplitude, mirroring humanization.Variation.amplitude."""
+    return human.get(key, 0.) if human.get('enabled') and human.get(key + '_enabled', True) else 0.
+
+
+def drift_limit(config):
+    """Baseline wobble the layout reserves above and below every plain line."""
+    return human_amplitude(config.get('humanization', {}), 'baseline')
+
+
 def plain_line_drift(config):
-    human=config.get('humanization',{})
-    drift=human.get('baseline',0.) if human.get('enabled') and human.get('baseline_enabled',True) else 0.
-    return min(drift,max(0.,(config['pitch']-max(config['size'],config['latin_size']))/2))
+    return min(drift_limit(config), max(0., (config['pitch'] - max(config['size'], config['latin_size'])) / 2))
+
+
+def ink_shape(font, char):
+    """Raw ink box of one glyph in units of the nominal height.
+
+    Returns (top, bottom, width) measured from the nominal box top, with y
+    pointing down. These are the true ink edges, not the ones Glyphs.box clamps
+    to the nominal box, because humanization rotates the ink itself.
+    """
+    if ord(char) not in font.index:
+        return None
+    glyph = font.glyph(char)
+    if not glyph.coordinates:
+        return None
+    reference = font.cjk_metrics if is_cjk(char) else font.metrics
+    scale = 1. / reference['reference_height']
+    left, top, right, bottom = glyph.bounds
+    return ((top - reference['reference_top']) * scale,
+            (bottom - reference['reference_top']) * scale,
+            (right - left) * scale, True)
+
+
+# Glyph parsing dominates a prediction, so shapes are cached per font file.
+# A font update rewrites the file and changes its mtime, which invalidates them.
+INK_CACHE = {}
+INK_CACHE_LIMIT = 100000
+
+
+def cached_ink_shape(font, char):
+    key = getattr(font, '_ink_key', None)
+    if key is None:
+        try:
+            key = (str(font.path), font.path.stat().st_mtime_ns)
+        except OSError:
+            key = (str(font.path), 0)
+        font._ink_key = key
+    entry = (key, char)
+    if entry not in INK_CACHE:
+        if len(INK_CACHE) >= INK_CACHE_LIMIT:
+            INK_CACHE.clear()
+        INK_CACHE[entry] = ink_shape(font, char)
+    return INK_CACHE[entry]
+
+
+def fallback_ink_shape(char):
+    """Ink shape of the built-in stand-ins Glyphs.box substitutes for missing glyphs.
+
+    These are returned before the humanization transform, so `varied` is false.
+    """
+    if char in SUPERSCRIPT or char in SUBSCRIPT:
+        # Glyphs.box nests the base glyph at 0.62× and lifts or drops the result;
+        # the outer box is the inner ink shifted, never scaled by the lift itself.
+        inner = fallback_ink_shape((SUPERSCRIPT if char in SUPERSCRIPT else SUBSCRIPT)[char])
+        if inner is None:
+            return None
+        lift = .45 if char in SUPERSCRIPT else .22
+        return .62 * inner[0] + lift - .45, 1. + .62 * (inner[1] - 1.) + lift, 0., False
+    if char in SYMBOLS:
+        height = max(1., max(y for stroke in SYMBOLS[char] for _, y in stroke))
+        return 0., height, 0., False
+    if ASCII_FALLBACK.get(char, char) in PUNCT_PATHS:
+        return 0., 1.05, 0., False
+    return None
+
+
+def plain_characters(text):
+    """Distinct characters laid out as plain glyphs; formulae keep their own height."""
+    try:
+        parts = [source for kind, source in items(text) if kind == 'text']
+    except ValueError:
+        # Unclosed delimiters are reported by generation; predict on the raw text.
+        parts = [text]
+    return {char for part in parts for char in part if not char.isspace()}
+
+
+def varied_ink(shape, human):
+    """Ink above and below the baseline after scale and rotation are applied.
+
+    Variation rotates and scales each glyph about its ink centre, so a wide glyph
+    reaches further up and down. The result is clamped to the nominal box like
+    Glyphs.box does. The vertical jitter only moves a glyph, so it is added once
+    per line edge by `line_pitch_budget` instead of growing each glyph here.
+    """
+    top, bottom, width, varied = shape
+    scale = 1. + human_amplitude(human, 'scale') / 100
+    angle = math.radians(human_amplitude(human, 'rotation'))
+    if varied and (scale != 1. or angle):
+        # Rotation happens about the ink centre, so both edges can reach further out.
+        reach = scale * ((bottom - top) / 2 * abs(math.cos(angle)) + width / 2 * abs(math.sin(angle)))
+        centre = (top + bottom) / 2
+        top, bottom = min(top, centre - reach), max(bottom, centre + reach)
+    # Glyphs.box clamps the ink into the nominal box before measuring, so a glyph
+    # that sits inside it still claims the full height above the baseline.
+    return 1. - min(0., top), max(0., bottom - 1.)
+
+
+def ink_extremes(fonts, choices, text, latin=None, human=None):
+    """Worst ink above and below the box for the Chinese and Latin scripts.
+
+    Every selected font that may render a character is considered, because the
+    mixed-font choice is random per character and must never overflow.
+    """
+    human = human or {}
+    extremes = {'zh': (1., 0., False), 'en': (1., 0., False)}
+    for char in plain_characters(text):
+        script = script_of(char)
+        best = None
+        for index, choice in enumerate(choices):
+            if choice['weight'] > 0 and scoped(choice['scope'], script):
+                value = cached_ink_shape(fonts[index], char)
+                if value:
+                    best = value if best is None else (min(best[0], value[0]), max(best[1], value[1]),
+                                                       max(best[2], value[2]), True)
+        if best is None and latin is not None and char.isascii():
+            best = cached_ink_shape(latin, char)
+        if best is None:
+            best = fallback_ink_shape(char)
+        if best is None:
+            continue  # Generation reports the missing character together with its scope.
+        ascent, descent = varied_ink(best, human)
+        old_ascent, old_descent, _ = extremes[script]
+        extremes[script] = (max(old_ascent, ascent), max(old_descent, descent), True)
+    return extremes
+
+
+def line_pitch_budget(config, extremes):
+    """Ink height and reserved drift for a given looseness, in millimetres."""
+    ratio_latin = config['latin_size'] / config['size']
+    looseness = config['line_looseness']
+    if config['line_sizing'] == 'rows':
+        pitch = config['available'] / config['rows']
+        size = pitch / looseness
+    elif config['line_sizing'] == 'size':
+        size = config['size']
+        pitch = max(size, size * ratio_latin) * looseness
+    else:
+        size, pitch = config['size'], config['pitch']
+    latin_size = size * ratio_latin
+    # A line's height is its tallest ascent plus its deepest descent; those can
+    # come from different scripts, so combine per component like the renderer.
+    ascent = max((height * extremes[script][0] for script, height in (('zh', size), ('en', latin_size))
+                  if extremes[script][2]), default=0.)
+    descent = max((height * extremes[script][1] for script, height in (('zh', size), ('en', latin_size))
+                   if extremes[script][2]), default=0.)
+    # Jitter can push one glyph up and another down, so each line edge grows by it.
+    lift = human_amplitude(config.get('humanization', {}), 'vertical') if ascent or descent else 0.
+    ascent, descent = ascent + lift, descent + lift
+    drift = min(drift_limit(config), max(0., (pitch - max(size, latin_size)) / 2))
+    return dict(pitch=pitch, size=size, latin_size=latin_size, ink=ascent + descent,
+                drift=drift, budget=pitch - 2 * drift)
+
+
+def minimum_line_pitch(fonts, choices, config, text, latin=None):
+    """Smallest looseness whose line box holds every glyph's ink.
+
+    This is the same budget `prepare_notebook_tokens` scales into, so at or above
+    the reported ratio the requested Chinese and English heights survive intact.
+    The search also respects the 2–20 mm height and 1–200 row limits, and reports
+    `feasible=False` when no looseness in 1–4 can satisfy all of them.
+    """
+    extremes = ink_extremes(fonts, choices, text, latin, config.get('humanization'))
+    ratio_latin = config['latin_size'] / config['size']
+    sizing = config['line_sizing']
+
+    def evaluate(looseness):
+        return line_pitch_budget(dict(config, line_looseness=looseness), extremes)
+
+    def structural(looseness):
+        """Whether the derived heights and row count stay inside the documented limits."""
+        values = evaluate(looseness)
+        if sizing == 'rows':
+            return (2 <= values['size'] <= 20 and 2 <= values['latin_size'] <= 20
+                    and values['latin_size'] <= values['pitch'] + .001)
+        if sizing == 'size':
+            return 1 <= math.floor((config['available'] + .000001) / values['pitch']) <= 200
+        return True
+
+    def fits(looseness):
+        values = evaluate(looseness)
+        return values['ink'] <= values['budget'] + 1e-9 and structural(looseness)
+
+    if sizing is None:
+        return dict(ratio=1., min_ratio=1., pitch_mm=config['pitch'], ink_mm=None,
+                    feasible=True, drift_mm=0.)
+
+    # Feasibility is an interval, not a threshold: in fixed-height mode a loose
+    # setting can drop the row count below one. Scan the documented 1–4 range at
+    # 1% steps to find the first feasible looseness, then refine it.
+    steps = [step / 100 for step in range(100, 401)]
+    first = next((value for value in steps if fits(value)), None)
+    if first is None:
+        # Nothing satisfies every limit, so report the roomiest looseness that at
+        # least keeps the heights and rows valid; the hint asks for a fix.
+        room = [value for value in steps if structural(value)] or steps
+        looseness = max(room, key=lambda value: evaluate(value)['budget'] - evaluate(value)['ink'])
+        feasible = False
+    elif first == 1.:
+        looseness, feasible = 1., True
+    else:
+        low, high = first - .01, first
+        for _ in range(30):
+            middle = (low + high) / 2
+            if fits(middle):
+                high = middle
+            else:
+                low = middle
+        looseness, feasible = high, True
+    values = evaluate(looseness)
+    return dict(ratio=looseness, min_ratio=math.ceil(looseness * 100 - 1e-6) / 100,
+                pitch_mm=values['pitch'], ink_mm=values['ink'], size=values['size'],
+                latin_size=values['latin_size'], drift_mm=values['drift'], feasible=feasible)
+
+
+def predict_line_pitch(data, choices, loader=GFont):
+    """Predict the smallest usable line pitch for the requested layout.
+
+    Only notebook mode has a looseness setting; grid mode and the legacy
+    no-sizing request report a floor of 1 and keep their own pitch.
+    """
+    config = configuration(data, strict=False)
+    if config['mode'] != 'notebook' or config['line_sizing'] is None:
+        return dict(mode=config['mode'], line_sizing=config['line_sizing'], ratio=1., min_ratio=1.,
+                    pitch_mm=config['pitch'], ink_mm=None, feasible=True, drift_mm=0.)
+    pages = data.get('pages', [dict(text=data.get('text', ''))])
+    texts = []
+    if isinstance(pages, list):
+        for page in pages[:MAX_PAGES]:
+            if not isinstance(page, dict) or not isinstance(page.get('text'), str):
+                continue
+            text = page['text'].replace('\r\n', '\n').replace('\r', '\n')
+            for section in re.split(r'\f|\\(?:newpage|pagebreak)\b', text):
+                texts.append(markdown_text(section) if data.get('input_format') == 'markdown' else section)
+    text = '\n'.join(texts)[:30000]
+    entries = normalized([c for c in choices if c['weight'] > 0])
+    if not entries:
+        raise ValueError('请选择至少一种可用字体')
+    with contextlib.ExitStack() as stack:
+        fonts = [stack.enter_context(loader(c['path'])) for c in entries]
+        demo = pathlib.Path(__file__).resolve().parents[1] / 'gcodeFonts' / 'demo.gfont'
+        latin = stack.enter_context(loader(demo)) if demo.is_file() else None
+        result = minimum_line_pitch(fonts, entries, config, text, latin)
+    result.update(mode=config['mode'], line_sizing=config['line_sizing'])
+    return result
 
 
 def prepare_notebook_tokens(tokens, config):

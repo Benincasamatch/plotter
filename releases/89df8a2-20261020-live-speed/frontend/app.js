@@ -191,7 +191,7 @@ function renderState(){
   $('downloadAll').disabled=!documentResult||busy;
   $('rerandomize').disabled=busy;
 }
-function invalidate(){sourcePages[sourceIndex]=$('text').value;revision++;$('origin').checked=false;currentJob=null;downloadJob=null;documentResult=null;renderOutputNavigation();$('fontUsage').hidden=true;$('previewStatus').textContent='参数已修改，请重新生成全部页面后下载或写入。';updateCount();renderState();if($('paperView').querySelector('svg'))$('phase').textContent=active()?(phases[state.phase]+' · 编辑内容未执行'):'内容已修改，请重新生成预览';}
+function invalidate(){sourcePages[sourceIndex]=$('text').value;revision++;scheduleLinePitch();$('origin').checked=false;currentJob=null;downloadJob=null;documentResult=null;renderOutputNavigation();$('fontUsage').hidden=true;$('previewStatus').textContent='参数已修改，请重新生成全部页面后下载或写入。';updateCount();renderState();if($('paperView').querySelector('svg'))$('phase').textContent=active()?(phases[state.phase]+' · 编辑内容未执行'):'内容已修改，请重新生成预览';}
 function coordinateSettings(){return {reverse_x:$('reverseX').checked,reverse_y:$('reverseY').checked,swap_xy:$('swapXY').checked,origin:$('originCorner').value};}
 function paperSettings(){syncNotebookSizing();return {line_sizing:$('lineSizing').value,line_looseness:Number($('lineLooseness').value),layout_mode:layoutMode||'notebook',pagination:$('pagination').value,width:Number($('width').value),height:Number($('height').value),margin_top:Number($('marginTop').value),margin_bottom:Number($('marginBottom').value),margin_left:Number($('marginLeft').value),margin_right:Number($('marginRight').value),rows:Number($('rows').value),size:Number($('size').value),latin_size:Number($('latinSize').value),punctuation_width:Number($('punctuationWidth').value),grid:{columns:Number($('gridColumns').value),row_gap:Number($('gridRowGap').value),column_gap:Number($('gridColumnGap').value),size_percent:Number($('gridSizePercent').value),padding:Number($('gridPadding').value),draw_lines:$('gridDrawLines').checked},coordinate_system:coordinateSettings(),device_port:profilePort,device_control:deviceControl(),humanization:currentHumanization()};}
 function currentHumanization(){
@@ -250,14 +250,53 @@ async function refreshCoordinatePreview(){
 }
 function notebookSizing(){return {lineSizing:$('lineSizing').value,lineLooseness:Number($('lineLooseness').value)};}
 function validNotebookSizing(value){return (value.lineSizing===undefined||['rows','size'].includes(value.lineSizing))&&(value.lineLooseness===undefined||(typeof value.lineLooseness==='number'&&Number.isFinite(value.lineLooseness)&&value.lineLooseness>=1&&value.lineLooseness<=4));}
+let linePitchFloor={ratio:1,pitch:null,ink:null,feasible:true,error:''},linePitchTimer,linePitchRevision=0;
 function restoreNotebookSizing(value){
+  // A floor predicted for the previous preset must not rewrite this one; the
+  // refresh below re-derives it for the restored layout.
+  linePitchFloor={ratio:1,pitch:null,ink:null,feasible:true,error:''};
   $('lineSizing').value=value.lineSizing||'rows';
   const v=value.values||currentLayout(),ratio=(v.height-v.marginTop-v.marginBottom)/v.rows/Math.max(v.size,v.latinSize||v.size);
   $('lineLooseness').value=value.lineLooseness??Math.max(1,Math.min(4,Math.round(ratio*100)/100));
   syncNotebookSizing();
 }
+function linePitchSettings(){
+  // The floor depends on which glyphs actually appear, so send the same pages a
+  // preview would receive; the editor's current text wins over the cached copy.
+  const pages=sourcePages.map((text,index)=>({text:index===sourceIndex?$('text').value:text}));
+  return {...paperSettings(),input_format:$('inputFormat').value,font_mix:selectedFonts.map(f=>({...f})),pages};
+}
+async function refreshLinePitch(){
+  const request=++linePitchRevision;
+  if(layoutMode!=='notebook'||!selectedFonts.some(f=>f.weight>0)){
+    linePitchFloor={ratio:1,pitch:null,ink:null,feasible:true,error:''};syncNotebookSizing();return;
+  }
+  try{
+    const result=await api('/api/line-pitch',linePitchSettings());
+    if(request!==linePitchRevision)return;
+    linePitchFloor={ratio:Math.min(4,Math.max(1,result.min_ratio)),pitch:result.pitch_mm,ink:result.ink_mm,feasible:result.feasible,error:''};
+  }catch(error){
+    if(request!==linePitchRevision)return;
+    linePitchFloor={ratio:1,pitch:null,ink:null,feasible:false,error:error.message};
+  }
+  syncNotebookSizing();
+}
+function scheduleLinePitch(){clearTimeout(linePitchTimer);linePitchTimer=setTimeout(refreshLinePitch,200);}
+function linePitchText(){
+  if(linePitchFloor.error)return ` 最小行距预测失败：${linePitchFloor.error}`;
+  if(!Number.isFinite(linePitchFloor.pitch))return '';
+  const floor=`最小可用行距 ${linePitchFloor.pitch.toFixed(2)} mm（${linePitchFloor.ratio.toFixed(2)} 倍）`;
+  if(!linePitchFloor.feasible)return ` ${floor}；当前字高与行数下没有可行的松紧，请减少行数、降低字高或增大上下边距。`;
+  return linePitchFloor.ratio>1.001?` ${floor}，滑块不能更紧。`:` ${floor}。`;
+}
 function syncNotebookSizing(){
   const notebook=layoutMode!=='grid',mode=$('lineSizing').value;
+  // A tighter looseness would squeeze the ink of the selected fonts, so the
+  // predicted floor becomes the slider's own minimum. An infeasible layout has
+  // no floor to enforce; the hint asks for a smaller row count or height instead.
+  const floor=notebook&&linePitchFloor.feasible?linePitchFloor.ratio:1;
+  $('lineLooseness').min=floor.toFixed(2);
+  if(Number($('lineLooseness').value)<floor)$('lineLooseness').value=floor.toFixed(2);
   $('rows').readOnly=notebook&&mode==='size';$('size').readOnly=notebook&&mode==='rows';$('latinSize').readOnly=$('size').readOnly;
   $('rows').closest('label').firstChild.textContent=$('rows').readOnly?'每页行数（自动）':'每页行数';
   $('size').closest('label').firstChild.textContent=$('size').readOnly?'中文字高 / mm（自动）':'中文字高 / mm';
@@ -271,10 +310,10 @@ function syncNotebookSizing(){
   try{
     const result=window.NotebookSizing.compute(currentLayout(),mode,ratio);
     if(mode==='rows'){$('size').value=Number(result.size.toFixed(6));$('latinSize').value=Number(result.latinSize.toFixed(6));}else $('rows').value=result.rows;
-    $('lineSizingHint').textContent=`${mode==='rows'?'行数固定，拖动滑块调整自动字高':'字高固定，拖动滑块调整行距和自动行数'}：${result.rows} 行 · 中文 ${result.size.toFixed(2)} / 英文 ${result.latinSize.toFixed(2)} mm · 行距 ${result.pitch.toFixed(2)} mm · 行间留白 ${result.gap.toFixed(2)} mm。`;
-  }catch(error){$('lineSizingHint').textContent=error.message;}
+    $('lineSizingHint').textContent=`${mode==='rows'?'行数固定，拖动滑块调整自动字高':'字高固定，拖动滑块调整行距和自动行数'}：${result.rows} 行 · 中文 ${result.size.toFixed(2)} / 英文 ${result.latinSize.toFixed(2)} mm · 行距 ${result.pitch.toFixed(2)} mm · 行间留白 ${result.gap.toFixed(2)} mm。${linePitchText()}`;
+  }catch(error){$('lineSizingHint').textContent=error.message+linePitchText();}
 }
-function coordinateChanged(){syncNotebookSizing();invalidate();$('origin').checked=false;clearTimeout(axisTimer);axisTimer=setTimeout(refreshCoordinatePreview,150);}
+function coordinateChanged(){syncNotebookSizing();scheduleLinePitch();invalidate();$('origin').checked=false;clearTimeout(axisTimer);axisTimer=setTimeout(refreshCoordinatePreview,150);}
 function findPreset(){return [...builtinPresets,...layoutPresets].find(p=>p.id===selectedPreset);}
 function validPresetValues(values,mode=layoutMode||'notebook'){
   if(!values||typeof values!=='object')return false;
@@ -527,6 +566,7 @@ async function load(){
   renderFontMix();
   window.FontBrowser?.start();
   state=await api('/api/state');renderState();await loadPorts();
+  await refreshLinePitch();
   await refreshCoordinatePreview();
 }
 async function action(task){if(busy)return;actionRevision++;busy=true;renderState();try{await task();}catch(error){notice(error.message,true);}finally{busy=false;renderState();}}
