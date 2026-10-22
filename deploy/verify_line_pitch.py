@@ -56,16 +56,17 @@ def render_ink(extra, seed):
 
 
 def render_scale(looseness, extra, seed):
-    """The factor prepare_notebook_tokens applies to plain glyphs, 1 when nothing shrinks."""
+    """How much prepare_notebook_tokens scales plain glyphs: 1 when nothing shrinks."""
     config = document.configuration(dict(BASE, line_looseness=looseness, seed=seed, **extra))
     with contextlib.ExitStack() as stack:
         glyphs = document.Glyphs(document.normalized(CHOICES), stack, config, seed)
         tokens = document.tokenize(extra['text'], glyphs, config)
-        plain = [t for t in tokens if t != '\n' and not t.formula]
-        ink = (max((t.box.baseline for t in plain), default=0.)
-               + max((t.box.height - t.box.baseline for t in plain), default=0.))
-        budget = config['pitch'] - 2 * document.plain_line_drift(config)
-    return min(1., budget / ink) if ink else 1.
+        prepared = document.prepare_notebook_tokens(tokens, config)
+    before = [t for t in tokens if t != '\n' and not t.formula]
+    after = [t for t in prepared if t != '\n' and not t.formula]
+    if not before:
+        return 1.
+    return min(after.box.height / before.box.height for before, after in zip(before, after) if before.box.height)
 
 
 def check_floor_keeps_heights():
@@ -145,6 +146,52 @@ def check_modes():
     print('ok  表格 / 旧请求 / 空白文档')
 
 
+def check_overlap():
+    """Overlap mode must keep the requested pitch and heights below the floor."""
+    text = '油井Agjy压力不稳\n第二行油井Agjy'
+    for sizing in ('size', 'rows'):
+        extra = dict(text=text, line_sizing=sizing, allow_overlap=True, line_looseness=1.)
+        if sizing == 'rows':
+            extra['rows'] = 60
+        result = document.predict_line_pitch(dict(BASE, pages=[dict(text=text)], **{k: v for k, v in extra.items() if k != 'text'}), CHOICES)
+        assert result['min_ratio'] == 1, f'{sizing}: 允许重叠时下限应为 1，实际 {result["min_ratio"]}'
+        assert result['allow_overlap'] and result['overlap'], f'{sizing}: 未回显允许重叠'
+        # The measured floor is still reported so the hint can name what is ignored.
+        reference = document.predict_line_pitch(dict(BASE, pages=[dict(text=text)], **{k: v for k, v in extra.items() if k not in ('text', 'allow_overlap')}), CHOICES)
+        assert result['ratio'] == reference['ratio'], f'{sizing}: 参考下限被改动'
+        sub_floor = {k: v for k, v in extra.items() if k != 'line_looseness'}
+        scale = render_scale(1., sub_floor, 'overlap')
+        assert scale == 1, f'{sizing}: 允许重叠时仍然压缩到 {scale:.4f}'
+        metadata = render_size(1., sub_floor, 'overlap')
+        assert metadata['allow_overlap'], f'{sizing}: 元数据缺少 allow_overlap'
+        expected = 5. if sizing == 'size' else (297 - 60) / 60
+        assert abs(metadata['pitch'] - expected) < .001, f'{sizing}: 行距被改动 {metadata["pitch"]}'
+        if sizing == 'size':
+            assert abs(metadata['size'] - 5) < .001, f'{sizing}: 字高被压缩 {metadata["size"]}'
+        print(f'ok  {sizing}: 允许重叠时行距 {metadata["pitch"]:.2f} mm，未压缩字形')
+    # Guards that must survive: one line taller than the page, and fixed pagination.
+    try:
+        document.generate_document(FONT, dict(BASE, line_sizing='size', size=20, allow_overlap=True, height=60,
+                                              margin_top=25, margin_bottom=25, pages=[dict(text='国')]), CHOICES)
+        raise AssertionError('允许重叠时单行超高未报错')
+    except ValueError as error:
+        assert '超过单页可写范围' in str(error), error
+    try:
+        document.generate_document(FONT, dict(BASE, pagination='fixed', line_sizing='size', line_looseness=1.,
+                                              allow_overlap=True, pages=[dict(text='\n'.join(['油井Agjy'] * 60))]), CHOICES)
+        raise AssertionError('允许重叠时固定分页未报错')
+    except ValueError as error:
+        assert '溢出' in str(error), error
+    # Without the flag the same requests keep their old limits.
+    try:
+        document.generate_document(FONT, dict(BASE, line_sizing='rows', rows=200, line_looseness=1.,
+                                              pages=[dict(text='中文测试')]), CHOICES)
+        raise AssertionError('未允许重叠时 200 行小字未被拦截')
+    except ValueError as error:
+        assert '2–20 mm' in str(error), error
+    print('ok  允许重叠时仍保留单行超高、固定分页与字高范围拦截')
+
+
 def check_infeasible():
     """An impossible layout reports feasible=False and still yields a usable number."""
     result = document.predict_line_pitch(dict(BASE, height=60, margin_top=25, margin_bottom=25, size=20,
@@ -159,5 +206,6 @@ if __name__ == '__main__':
     check_tighter_than_floor()
     check_budget_matches_renderer()
     check_modes()
+    check_overlap()
     check_infeasible()
     print('LINE_PITCH_VERIFY_OK')

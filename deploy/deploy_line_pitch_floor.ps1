@@ -1,4 +1,4 @@
-. (Join-Path $PSScriptRoot 'deploy-git-rollback.ps1')
+﻿. (Join-Path $PSScriptRoot 'deploy-git-rollback.ps1')
 $ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $taskRoot='C:\Users\102\plotter-web-20261014'
@@ -35,6 +35,19 @@ function Line-Pitch([hashtable]$taskExtra){
  # Invoke-RestMethod would otherwise encode the body as ASCII and mangle Chinese text.
  $taskBytes=[Text.Encoding]::UTF8.GetBytes($taskBody)
  return Invoke-RestMethod http://127.0.0.1:8080/api/line-pitch -Method Post -ContentType 'application/json; charset=utf-8' -Body $taskBytes -TimeoutSec 60
+}
+function Preview-Document([string]$taskText,[string]$taskFont,[bool]$taskOverlap=$false){
+ # `size` sizing with a 1× looseness is exactly the request the overlap toggle makes.
+ $taskBody=@{
+  layout_mode='notebook';line_sizing='size';line_looseness=1;pagination='auto'
+  width=210;height=297;margin_top=30;margin_bottom=30;margin_left=30;margin_right=30
+  rows=20;size=5;latin_size=5;punctuation_width=.8;spacing=.9;feed=1800;move_feed=3000
+  seed='deploy-check';input_format='plain';pages=@(@{text=$taskText});font_mix=@(@{font_id=$taskFont;weight=1})
+ }
+ if($taskOverlap){$taskBody['allow_overlap']=$true}
+ $taskBody=$taskBody | ConvertTo-Json -Depth 6
+ $taskBytes=[Text.Encoding]::UTF8.GetBytes($taskBody)
+ return Invoke-RestMethod http://127.0.0.1:8080/api/preview -Method Post -ContentType 'application/json; charset=utf-8' -Body $taskBytes -TimeoutSec 180
 }
 $taskBefore=Invoke-RestMethod http://127.0.0.1:8080/api/state -TimeoutSec 5
 if($taskBefore.phase -ne 'complete' -and $taskBefore.phase -ne 'disconnected'){throw ('Refusing to restart during phase '+$taskBefore.phase)}
@@ -74,18 +87,35 @@ try{
  # 4. Grid mode has no looseness slider, so it must report a floor of 1 and no pitch change.
  $taskGrid=Line-Pitch @{layout_mode='grid';grid=@{columns=20;row_gap=2.9;column_gap=0;size_percent=80;padding=.3;draw_lines=$false}}
  if($taskGrid.min_ratio -ne 1){throw ('Grid floor should stay 1, got '+$taskGrid.min_ratio)}
- # 5. The prediction is read-only: it must not create a job or touch the device.
+ # 5. Overlap mode releases the floor but still reports the measured one.
+ $taskOverlap=Line-Pitch @{allow_overlap=$true}
+ if($taskOverlap.min_ratio -ne 1){throw ('Overlap floor should be 1, got '+$taskOverlap.min_ratio)}
+ if(-not $taskOverlap.allow_overlap -or -not $taskOverlap.overlap){throw 'Overlap flag not echoed'}
+ if([math]::Abs($taskOverlap.ratio-$taskPlain.ratio) -gt .0001){throw ('Overlap changed the measured floor: '+$taskPlain.ratio+' -> '+$taskOverlap.ratio)}
+ # 6. Overlap preview keeps the requested pitch and height, and records the flag.
+ $taskOverlapText=[string]::Join([char]10, @('油井Agjy压力不稳','第二行油井Agjy'))
+ $taskNormalPreview=Preview-Document $taskOverlapText $script:taskFont $false
+ $taskOverlapPreview=Preview-Document $taskOverlapText $script:taskFont $true
+ if(-not $taskOverlapPreview.pages[0].metadata.allow_overlap){throw 'Preview metadata lost allow_overlap'}
+ if($taskNormalPreview.pages[0].metadata.allow_overlap){throw 'Normal preview reported allow_overlap'}
+ if([math]::Abs($taskOverlapPreview.pages[0].metadata.pitch-5) -gt .001){throw ('Overlap changed the pitch to '+$taskOverlapPreview.pages[0].metadata.pitch)}
+ if([math]::Abs($taskOverlapPreview.pages[0].metadata.size-5) -gt .001){throw ('Overlap shrank the glyphs to '+$taskOverlapPreview.pages[0].metadata.size)}
+ # Both lines keep their 5 mm pitch, so the ink runs deeper than the same page without overlap.
+ if($taskOverlapPreview.pages[0].metadata.bounds[3] -le $taskNormalPreview.pages[0].metadata.bounds[3]){throw 'Overlap did not let the lines share ink'}
+ # 7. The prediction is read-only: it must not create a job or touch the device.
  if((Listener-Pid 8090) -ne $taskControllerPid){throw 'Controller PID changed'}
  if($taskAfter.job_id -ne $taskBefore.job_id -or $taskAfter.acknowledged -lt $taskBefore.acknowledged){throw 'Task continuity check failed'}
  if($taskAfter.error -and $taskAfter.error -ne $taskBefore.error){throw 'New controller error'}
- # 6. The slider markup and the predictor must both be live in the served frontend.
+ # 8. The slider markup, the overlap toggle and the predictor must all be live.
  $taskHtml=(Invoke-WebRequest http://127.0.0.1:8080/ -UseBasicParsing -TimeoutSec 5).Content
  if($taskHtml -notmatch 'id="lineLooseness"'){throw 'Looseness slider missing'}
+ if($taskHtml -notmatch 'id="allowOverlap"'){throw 'Overlap toggle missing'}
  $taskApp=(Invoke-WebRequest http://127.0.0.1:8080/app.js -UseBasicParsing -TimeoutSec 5)
  if($taskApp.Content -notmatch '/api/line-pitch'){throw 'Frontend does not request the prediction'}
  if($taskApp.Content -notmatch "lineLooseness'\)\.min"){throw 'Frontend does not apply the predicted floor'}
  [pscustomobject]@{Result='UPDATED';ControllerPid=$taskControllerPid;BackendPid=(Listener-Pid 8080);Phase=$taskAfter.phase;JobId=$taskAfter.job_id;
-  PlainFloor=$taskPlain.min_ratio;HumanFloor=$taskHuman.min_ratio;ChineseFloor=$taskChinese.min_ratio;Files=$taskManifest.files} | ConvertTo-Json -Depth 4
+  PlainFloor=$taskPlain.min_ratio;HumanFloor=$taskHuman.min_ratio;ChineseFloor=$taskChinese.min_ratio;
+  OverlapFloor=$taskOverlap.min_ratio;OverlapPitch=$taskOverlapPreview.pages[0].metadata.pitch;Files=$taskManifest.files} | ConvertTo-Json -Depth 4
 }catch{
  $taskFailure=$_
  Stop-ScheduledTask -TaskName 'Xieziji-Web' -ErrorAction SilentlyContinue

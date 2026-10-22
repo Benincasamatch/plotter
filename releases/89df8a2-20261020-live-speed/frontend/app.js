@@ -193,7 +193,7 @@ function renderState(){
 }
 function invalidate(){sourcePages[sourceIndex]=$('text').value;revision++;scheduleLinePitch();$('origin').checked=false;currentJob=null;downloadJob=null;documentResult=null;renderOutputNavigation();$('fontUsage').hidden=true;$('previewStatus').textContent='参数已修改，请重新生成全部页面后下载或写入。';updateCount();renderState();if($('paperView').querySelector('svg'))$('phase').textContent=active()?(phases[state.phase]+' · 编辑内容未执行'):'内容已修改，请重新生成预览';}
 function coordinateSettings(){return {reverse_x:$('reverseX').checked,reverse_y:$('reverseY').checked,swap_xy:$('swapXY').checked,origin:$('originCorner').value};}
-function paperSettings(){syncNotebookSizing();return {line_sizing:$('lineSizing').value,line_looseness:Number($('lineLooseness').value),layout_mode:layoutMode||'notebook',pagination:$('pagination').value,width:Number($('width').value),height:Number($('height').value),margin_top:Number($('marginTop').value),margin_bottom:Number($('marginBottom').value),margin_left:Number($('marginLeft').value),margin_right:Number($('marginRight').value),rows:Number($('rows').value),size:Number($('size').value),latin_size:Number($('latinSize').value),punctuation_width:Number($('punctuationWidth').value),grid:{columns:Number($('gridColumns').value),row_gap:Number($('gridRowGap').value),column_gap:Number($('gridColumnGap').value),size_percent:Number($('gridSizePercent').value),padding:Number($('gridPadding').value),draw_lines:$('gridDrawLines').checked},coordinate_system:coordinateSettings(),device_port:profilePort,device_control:deviceControl(),humanization:currentHumanization()};}
+function paperSettings(){syncNotebookSizing();return {line_sizing:$('lineSizing').value,line_looseness:Number($('lineLooseness').value),allow_overlap:allowOverlap(),layout_mode:layoutMode||'notebook',pagination:$('pagination').value,width:Number($('width').value),height:Number($('height').value),margin_top:Number($('marginTop').value),margin_bottom:Number($('marginBottom').value),margin_left:Number($('marginLeft').value),margin_right:Number($('marginRight').value),rows:Number($('rows').value),size:Number($('size').value),latin_size:Number($('latinSize').value),punctuation_width:Number($('punctuationWidth').value),grid:{columns:Number($('gridColumns').value),row_gap:Number($('gridRowGap').value),column_gap:Number($('gridColumnGap').value),size_percent:Number($('gridSizePercent').value),padding:Number($('gridPadding').value),draw_lines:$('gridDrawLines').checked},coordinate_system:coordinateSettings(),device_port:profilePort,device_control:deviceControl(),humanization:currentHumanization()};}
 function currentHumanization(){
   const result={enabled:$('humanEnabled').checked};
   for(const [key,suffix] of Object.entries(humanFields)){result[key]=Number($('human'+suffix).value);result[key+'_enabled']=$('human'+suffix+'Enabled').checked;}
@@ -248,14 +248,21 @@ async function refreshCoordinatePreview(){
     displayPaper(guide.svg,guide.metadata);
   }catch(error){if(requestRevision===axisRevision&&captured===revision)notice(error.message,true);}
 }
-function notebookSizing(){return {lineSizing:$('lineSizing').value,lineLooseness:Number($('lineLooseness').value)};}
-function validNotebookSizing(value){return (value.lineSizing===undefined||['rows','size'].includes(value.lineSizing))&&(value.lineLooseness===undefined||(typeof value.lineLooseness==='number'&&Number.isFinite(value.lineLooseness)&&value.lineLooseness>=1&&value.lineLooseness<=4));}
-let linePitchFloor={ratio:1,pitch:null,ink:null,feasible:true,error:''},linePitchTimer,linePitchRevision=0;
+function allowOverlap(){return layoutMode==='notebook'&&$('allowOverlap').checked;}
+function notebookSizing(){return {lineSizing:$('lineSizing').value,lineLooseness:Number($('lineLooseness').value),allowOverlap:$('allowOverlap').checked};}
+function validNotebookSizing(value){return (value.lineSizing===undefined||['rows','size'].includes(value.lineSizing))&&(value.lineLooseness===undefined||(typeof value.lineLooseness==='number'&&Number.isFinite(value.lineLooseness)&&value.lineLooseness>=1&&value.lineLooseness<=4))&&(value.allowOverlap===undefined||typeof value.allowOverlap==='boolean');}
+// `ratio` is the measured floor (for the hint); `min` is the slider limit, which
+// overlap mode drops to 1.
+let linePitchFloor={ratio:1,min:1,pitch:null,ink:null,feasible:true,error:''},linePitchTimer,linePitchRevision=0;
 function restoreNotebookSizing(value){
   // A floor predicted for the previous preset must not rewrite this one; the
   // refresh below re-derives it for the restored layout.
-  linePitchFloor={ratio:1,pitch:null,ink:null,feasible:true,error:''};
+  linePitchFloor={ratio:1,min:1,pitch:null,ink:null,feasible:true,error:''};
   $('lineSizing').value=value.lineSizing||'rows';
+  $('allowOverlap').checked=Boolean(value.allowOverlap);
+  // A range input clamps on assignment, so clear the previous preset's floor
+  // before restoring a value that only this preset's floor allows.
+  $('lineLooseness').min='1';
   const v=value.values||currentLayout(),ratio=(v.height-v.marginTop-v.marginBottom)/v.rows/Math.max(v.size,v.latinSize||v.size);
   $('lineLooseness').value=value.lineLooseness??Math.max(1,Math.min(4,Math.round(ratio*100)/100));
   syncNotebookSizing();
@@ -269,15 +276,15 @@ function linePitchSettings(){
 async function refreshLinePitch(){
   const request=++linePitchRevision;
   if(layoutMode!=='notebook'||!selectedFonts.some(f=>f.weight>0)){
-    linePitchFloor={ratio:1,pitch:null,ink:null,feasible:true,error:''};syncNotebookSizing();return;
+    linePitchFloor={ratio:1,min:1,pitch:null,ink:null,feasible:true,error:''};syncNotebookSizing();return;
   }
   try{
     const result=await api('/api/line-pitch',linePitchSettings());
     if(request!==linePitchRevision)return;
-    linePitchFloor={ratio:Math.min(4,Math.max(1,result.min_ratio)),pitch:result.pitch_mm,ink:result.ink_mm,feasible:result.feasible,error:''};
+    linePitchFloor={ratio:Math.min(4,Math.max(1,result.ratio)),min:Math.min(4,Math.max(1,result.min_ratio)),pitch:result.pitch_mm,ink:result.ink_mm,feasible:result.feasible,error:''};
   }catch(error){
     if(request!==linePitchRevision)return;
-    linePitchFloor={ratio:1,pitch:null,ink:null,feasible:false,error:error.message};
+    linePitchFloor={ratio:1,min:1,pitch:null,ink:null,feasible:false,error:error.message};
   }
   syncNotebookSizing();
 }
@@ -286,15 +293,16 @@ function linePitchText(){
   if(linePitchFloor.error)return ` 最小行距预测失败：${linePitchFloor.error}`;
   if(!Number.isFinite(linePitchFloor.pitch))return '';
   const floor=`最小可用行距 ${linePitchFloor.pitch.toFixed(2)} mm（${linePitchFloor.ratio.toFixed(2)} 倍）`;
+  if(allowOverlap())return ` 已允许字重叠：滑块可低于 ${floor}，相邻行可能相互覆盖。`;
   if(!linePitchFloor.feasible)return ` ${floor}；当前字高与行数下没有可行的松紧，请减少行数、降低字高或增大上下边距。`;
   return linePitchFloor.ratio>1.001?` ${floor}，滑块不能更紧。`:` ${floor}。`;
 }
 function syncNotebookSizing(){
-  const notebook=layoutMode!=='grid',mode=$('lineSizing').value;
+  const notebook=layoutMode!=='grid',mode=$('lineSizing').value,overlap=allowOverlap();
   // A tighter looseness would squeeze the ink of the selected fonts, so the
-  // predicted floor becomes the slider's own minimum. An infeasible layout has
-  // no floor to enforce; the hint asks for a smaller row count or height instead.
-  const floor=notebook&&linePitchFloor.feasible?linePitchFloor.ratio:1;
+  // predicted floor becomes the slider's own minimum. Overlap mode drops that
+  // floor on purpose; an infeasible layout has none to enforce.
+  const floor=notebook&&!overlap&&linePitchFloor.feasible?linePitchFloor.min:1;
   $('lineLooseness').min=floor.toFixed(2);
   if(Number($('lineLooseness').value)<floor)$('lineLooseness').value=floor.toFixed(2);
   $('rows').readOnly=notebook&&mode==='size';$('size').readOnly=notebook&&mode==='rows';$('latinSize').readOnly=$('size').readOnly;
@@ -308,7 +316,7 @@ function syncNotebookSizing(){
   const ratio=Number($('lineLooseness').value);
   $('lineLoosenessValue').textContent=ratio.toFixed(2)+' 倍行距';
   try{
-    const result=window.NotebookSizing.compute(currentLayout(),mode,ratio);
+    const result=window.NotebookSizing.compute(currentLayout(),mode,ratio,overlap);
     if(mode==='rows'){$('size').value=Number(result.size.toFixed(6));$('latinSize').value=Number(result.latinSize.toFixed(6));}else $('rows').value=result.rows;
     $('lineSizingHint').textContent=`${mode==='rows'?'行数固定，拖动滑块调整自动字高':'字高固定，拖动滑块调整行距和自动行数'}：${result.rows} 行 · 中文 ${result.size.toFixed(2)} / 英文 ${result.latinSize.toFixed(2)} mm · 行距 ${result.pitch.toFixed(2)} mm · 行间留白 ${result.gap.toFixed(2)} mm。${linePitchText()}`;
   }catch(error){$('lineSizingHint').textContent=error.message+linePitchText();}
@@ -342,7 +350,7 @@ function updatePresetHint(){
   const preset=findPreset(), values=currentLayout();
   const oldRatio=preset?(preset.values.height-preset.values.marginTop-preset.values.marginBottom)/preset.values.rows/Math.max(preset.values.size,preset.values.latinSize):2.37;
   const savedRatio=preset?.lineLooseness??Math.max(1,Math.min(4,Math.round(oldRatio*100)/100));
-  const dirty=preset&&(layoutFields.some(key=>values[key]!==preset.values[key])||(layoutMode!=='grid'&&((preset.lineSizing||'rows')!==$('lineSizing').value||savedRatio!==Number($('lineLooseness').value)))||$('gridDrawLines').checked!==Boolean(preset.drawLines)||!sameHumanization(currentHumanization(),preset.humanization||humanDefault));
+  const dirty=preset&&(layoutFields.some(key=>values[key]!==preset.values[key])||(layoutMode!=='grid'&&((preset.lineSizing||'rows')!==$('lineSizing').value||savedRatio!==Number($('lineLooseness').value)||Boolean(preset.allowOverlap)!==$('allowOverlap').checked))||$('gridDrawLines').checked!==Boolean(preset.drawLines)||!sameHumanization(currentHumanization(),preset.humanization||humanDefault));
   $('presetHint').textContent=(dirty?'参数已修改，尚未保存。':'当前参数已载入预设。')+
     `保存${layoutMode==='grid'?'表格':'笔记'}模式的排版、标点、速度与仿真参数；仅保存在当前浏览器。`;
 }
@@ -746,6 +754,7 @@ $('undoFontPreset').onclick=()=>{
 for(const key of ['text','spacing','feed','moveFeed'])$(key).addEventListener('input',invalidate);
 $('lineSizing').onchange=()=>{coordinateChanged();updatePresetHint();};
 $('lineLooseness').addEventListener('input',()=>{coordinateChanged();updatePresetHint();});
+$('allowOverlap').onchange=()=>{coordinateChanged();scheduleLinePitch();updatePresetHint();};
 for(const key of ['width','height','marginTop','marginBottom','marginLeft','marginRight','rows','size','latinSize'])$(key).addEventListener('input',coordinateChanged);
 for(const key of ['punctuationWidth','gridColumns','gridRowGap','gridColumnGap','gridSizePercent','gridPadding'])$(key).addEventListener('input',coordinateChanged);
 $('gridDrawLines').onchange=()=>{coordinateChanged();updatePresetHint();};

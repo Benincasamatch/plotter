@@ -67,6 +67,12 @@ def configuration(data, strict=True):
     if sizing is not None and sizing not in ('rows', 'size'):
         raise ValueError('笔记排版须选择固定行数或固定字高')
     looseness = number(data, 'line_looseness', 2, 1, 4) if sizing is not None else None
+    # Overlap is a deliberate opt-out: lines keep the requested pitch even when the
+    # ink is taller than the line box, so nothing is scaled down or pushed apart.
+    allow_overlap = data.get('allow_overlap', False)
+    if type(allow_overlap) is not bool:
+        raise ValueError('允许字重叠开关必须为布尔值')
+    allow_overlap = allow_overlap and mode == 'notebook' and sizing is not None
     if mode == 'grid' or sizing is not None:
         base.pop('rows', None)
     requested_size = number(data, 'size', 5, 2, 20)
@@ -85,18 +91,19 @@ def configuration(data, strict=True):
             # The Chinese height fills the automatic line box; English keeps the chosen ratio.
             size = pitch / looseness
             latin_size = size * ratio
-            if strict and (not 2 <= size <= 20 or not 2 <= latin_size <= 20):
+            # Overlap mode exists to go past these limits on purpose.
+            if strict and not allow_overlap and (not 2 <= size <= 20 or not 2 <= latin_size <= 20):
                 raise ValueError('自动字高须使中英文都在 2–20 mm，请调整行数、松紧或上下边距')
-            if strict and latin_size > pitch + .001:
+            if strict and not allow_overlap and latin_size > pitch + .001:
                 raise ValueError('英文字高超过行距，请减小英文字高或放宽行间松紧')
         elif sizing == 'size':
             pitch = max(size, latin_size) * looseness
             rows = math.floor((available + .000001) / pitch)
-            if strict and not 1 <= rows <= 200:
+            if strict and not allow_overlap and not 1 <= rows <= 200:
                 raise ValueError('自动行数须为 1–200 行，请调整字高、松紧或上下边距')
             rows = max(1, rows)
         else:
-            if strict and rows * max(size, latin_size) > available + .001:
+            if strict and not allow_overlap and rows * max(size, latin_size) > available + .001:
                 raise ValueError('指定行数与字大小超过可写高度')
             pitch = available / rows
     raw = data.get('grid', {})
@@ -118,7 +125,7 @@ def configuration(data, strict=True):
         raise ValueError('分页方式必须是自动续页或固定每页内容')
     return dict(mode=mode, width=width, height=height, margins=margins, size=size, latin_size=latin_size, rows=rows,
                 pitch=pitch, usable=usable, available=available, grid=grid, pagination=pagination,
-                line_sizing=sizing, line_looseness=looseness,
+                line_sizing=sizing, line_looseness=looseness, allow_overlap=allow_overlap,
                 punctuation_width=number(data, 'punctuation_width', .8, 0, 2),
                 spacing=number(data, 'spacing', size * .18, 0, 10),
                 feed=number(data, 'feed', 1800, 100, MAX_FEED),
@@ -173,6 +180,7 @@ def coordinate_preview(data):
     metadata['device_control'] = c['device_control']
     metadata.update(layout_mode=c['mode'], margins=c['margins'], size=c['size'], latin_size=c['latin_size'], rows=c['rows'],
                     line_sizing=c['line_sizing'], line_looseness=c['line_looseness'],
+                    allow_overlap=c['allow_overlap'],
                     pitch=c['pitch'], grid=c['grid'], humanization=c['humanization'],
                     writable=[c['usable'], c['available']], punctuation_width=c['punctuation_width'])
     return dict(svg=preview_svg(c, coordinates), metadata=metadata)
@@ -584,7 +592,8 @@ def predict_line_pitch(data, choices, loader=GFont):
     config = configuration(data, strict=False)
     if config['mode'] != 'notebook' or config['line_sizing'] is None:
         return dict(mode=config['mode'], line_sizing=config['line_sizing'], ratio=1., min_ratio=1.,
-                    pitch_mm=config['pitch'], ink_mm=None, feasible=True, drift_mm=0.)
+                    pitch_mm=config['pitch'], ink_mm=None, feasible=True, drift_mm=0.,
+                    allow_overlap=config['allow_overlap'])
     pages = data.get('pages', [dict(text=data.get('text', ''))])
     texts = []
     if isinstance(pages, list):
@@ -603,7 +612,11 @@ def predict_line_pitch(data, choices, loader=GFont):
         demo = pathlib.Path(__file__).resolve().parents[1] / 'gcodeFonts' / 'demo.gfont'
         latin = stack.enter_context(loader(demo)) if demo.is_file() else None
         result = minimum_line_pitch(fonts, entries, config, text, latin)
-    result.update(mode=config['mode'], line_sizing=config['line_sizing'])
+    result.update(mode=config['mode'], line_sizing=config['line_sizing'], allow_overlap=config['allow_overlap'])
+    if config['allow_overlap']:
+        # Overlap mode never scales glyphs, so the floor stops being a limit; the
+        # prediction is still reported so the hint can name what is being ignored.
+        result.update(min_ratio=1., feasible=True, overlap=True)
     return result
 
 
@@ -612,8 +625,10 @@ def prepare_notebook_tokens(tokens, config):
 
     Manual newlines do not trigger another size decision. Every ordinary line
     uses the same scale, while formulas retain their own height and scale.
+    Overlap mode skips the fit entirely: the user asked for the requested
+    heights even where the ink crosses the line box.
     """
-    if config.get('line_sizing') is None:
+    if config.get('line_sizing') is None or config.get('allow_overlap'):
         return tokens
     budget=config['pitch']-2*plain_line_drift(config)
     plain=[t for t in tokens if t!='\n' and not t.formula]
@@ -701,12 +716,22 @@ def notebook_pages(tokens, config, glyphs):
         if config['line_sizing'] is not None and not any(t.formula for t in line):
             drift_amplitude=plain_line_drift(config)
         height += 2 * drift_amplitude
-        slots = max(1, math.ceil((height - .0001) / config['pitch']))
-        if slots > config['rows'] or height > config['available'] + .001:
-            raise ValueError('公式或字形高度超过单页可写范围，请减小字号或增加页面高度')
-        if row_cursor + slots > config['rows']:
-            pages.append((paths, lines, page_tokens, list(guides.values()))); paths, lines, page_tokens, row_cursor = [], [], [], 0
-            guides = default_guides()
+        if config['allow_overlap']:
+            # One source line per row: neighbouring lines may share ink, but the
+            # last line still must not reach past the writable bottom.
+            slots = 1
+            if height > config['available'] + .001:
+                raise ValueError('公式或字形高度超过单页可写范围，请减小字号或增加页面高度')
+            if row_cursor and row_cursor * config['pitch'] + height > config['available'] + .001:
+                pages.append((paths, lines, page_tokens, list(guides.values()))); paths, lines, page_tokens, row_cursor = [], [], [], 0
+                guides = default_guides()
+        else:
+            slots = max(1, math.ceil((height - .0001) / config['pitch']))
+            if slots > config['rows'] or height > config['available'] + .001:
+                raise ValueError('公式或字形高度超过单页可写范围，请减小字号或增加页面高度')
+            if row_cursor + slots > config['rows']:
+                pages.append((paths, lines, page_tokens, list(guides.values()))); paths, lines, page_tokens, row_cursor = [], [], [], 0
+                guides = default_guides()
         x, y = config['margins']['left'], config['margins']['top'] + row_cursor * config['pitch']
         phase = glyphs.variation.line_phase() if glyphs.variation else 0.
         # Smooth line drift gets reserved space instead of crossing page margins.
@@ -804,7 +829,8 @@ def emit(config, data, paper_paths, lines, tokens, glyphs, seed, source_page, ro
     if config.get('device_port'):
         metadata['device_port'] = config['device_port']
     metadata.update(layout_mode=config['mode'], margins=config['margins'], writable=[config['usable'], config['available']],
-                    line_sizing=config['line_sizing'], line_looseness=config['line_looseness'], row_guides=row_guides,
+                    line_sizing=config['line_sizing'], line_looseness=config['line_looseness'],
+                    allow_overlap=config['allow_overlap'], row_guides=row_guides,
                     rows=config['rows'], size=config['size'], latin_size=config['latin_size'], pitch=config['pitch'], spacing=config['spacing'], feed=config['feed'], move_feed=config['move_feed'],
                     grid=config['grid'], punctuation_width=config['punctuation_width'], humanization=config['humanization'],
                     seed=seed, source_page=source_page, lines=lines, text='\n'.join(lines), bounds=bounds, machine_bounds=machine_bounds,
