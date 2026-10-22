@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# 运行时任务、日志与测试数据
+plotter/jobs/
+backend-jobs/
+controller-jobs/
+backend/jobs/
+.testdata/
+plotter/.testdata/
+.controller-testdata/
+**/.controller-testdata/
+*.log
+*.log.previous
+*.jsonl
+
+# 部署产物：安装包、压缩包、编译产物、备份与暂存目录
+*.whl
+*.tar
+*.tar.gz
+*.zip
+*.exe
+*.dll
+*.pcap
+*.etl
+releases/*/controller/bin/
+releases/*/controller/build/
+releases/*/controller/.testdata/*/
+deploy/backups/
+deploy/services/
+deploy/*-stage-*/
+deploy/cjk-rows-stage-*/
+deploy/*.bak
+deploy/*.before-*
+
+# 密钥与令牌
+deploy/access-token.txt
+.env
+.env.*
+
+# 预览与截图
+plotter/preview-*.jpg
+plotter/preview-*.png
+
+# 本机字体目录（符号链接，不随仓库分发）
+gcodeFonts/
