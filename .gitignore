@@ -49,3 +49,4 @@ gcodeFonts/
 
 # 历史快照由 Git 管理，不忽略
 !deploy/history/
+deploy/markdown-formula-fix-stage-*/

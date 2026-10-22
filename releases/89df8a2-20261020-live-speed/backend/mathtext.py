@@ -59,11 +59,13 @@ SYMBOLS = {
     '→': [[(.05,.5),(.95,.5)],[(.65,.2),(.95,.5),(.65,.8)]],
     '°': [[(.5,.05),(.3,.1),(.25,.3),(.45,.4),(.65,.3),(.7,.1),(.5,.05)]],
     '∂': [[(.2,.1),(.55,.05),(.8,.3),(.85,.65),(.65,.9),(.3,.9),(.15,.7),(.3,.45),(.65,.45),(.85,.65)]],
+    '≡': [[(.1,.2),(.9,.2)],[(.1,.5),(.9,.5)],[(.1,.8),(.9,.8)]],
 }
 COMMANDS = dict(alpha='α', beta='β', gamma='γ', delta='δ', theta='θ', lambda_='λ', mu='μ',
                 sigma='σ', phi='φ', omega='ω', pi='π', Delta='Δ', Sigma='Σ', sum='∑',
                 int='∫', infty='∞', times='×', div='÷', pm='±', cdot='·', le='≤', leq='≤',
-                ge='≥', geq='≥', ne='≠', neq='≠', to='→', rightarrow='→', partial='∂', circ='°')
+                ge='≥', geq='≥', ne='≠', neq='≠', to='→', rightarrow='→', partial='∂', circ='°',
+                equiv='≡', varphi='φ', lbrack='[', rbrack=']')
 COMMANDS['lambda'] = COMMANDS.pop('lambda_')
 
 
@@ -75,6 +77,9 @@ def symbol(char, size):
 
 class Parser:
     def __init__(self, source, glyph):
+        # Source documents often mix HTML script tags into formulas.
+        source = re.sub(r'<sub>(.*?)</sub>', r'_{\1}', source)
+        source = re.sub(r'<sup>(.*?)</sup>', r'^{\1}', source)
         if not source.strip() or len(source) > 1000:
             raise ValueError('公式需为 1–1000 个字符')
         self.source, self.glyph, self.pos = source, glyph, 0
@@ -107,7 +112,11 @@ class Parser:
                     raise ValueError('公式存在多余的右花括号 }')
                 self.pos += 1
                 break
-            base = self.group(size, depth) if self.source[self.pos] == '{' else self.atom(size, depth)
+            if self.source[self.pos] in '^_':
+                # Script without a base, e.g. prose converted from r<sub>D</sub>.
+                base = Box(0., size, size, [])
+            else:
+                base = self.group(size, depth) if self.source[self.pos] == '{' else self.atom(size, depth)
             scripts = {}
             self.spaces()
             while self.pos < len(self.source) and self.source[self.pos] in '^_':
@@ -199,9 +208,21 @@ class Parser:
                 return Box(size * ({'!':0., ',':.16, ';':.3, 'qquad':2.}.get(command, 1.)), size, size, [])
             if command in ('left', 'right'):
                 self.spaces()
-                if self.pos >= len(self.source) or self.source[self.pos] not in '()[]|':
-                    raise ValueError('\\left / \\right 后暂只支持圆括号、方括号和竖线')
-                return self.atom(size, depth + 1)
+                if self.pos >= len(self.source):
+                    raise ValueError('\\left / \\right 缺少配对界定符')
+                if self.source[self.pos] == '.':
+                    # Invisible delimiter: reserve no ink.
+                    self.pos += 1
+                    return Box(0., size, size, [])
+                if self.source[self.pos] in '()[]|<>/':
+                    return self.atom(size, depth + 1)
+                if self.source[self.pos] == '\\':
+                    match = re.match(r'\\([A-Za-z]+|.)', self.source[self.pos:])
+                    if match and (match[1] in COMMANDS or match[1] in '{}'):
+                        self.pos += len(match[0])
+                        char = COMMANDS.get(match[1], match[1])
+                        return symbol(char, size) if char in SYMBOLS else self.glyph(char, size)
+                raise ValueError('\\left / \\right 后暂只支持圆括号、方括号、竖线、尖括号、\\{ \\} 与 \\left.')
             if command in COMMANDS:
                 char = COMMANDS[command]
             elif command in '{}%$#_':

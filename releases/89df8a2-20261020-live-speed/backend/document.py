@@ -22,6 +22,9 @@ MAX_PAGES = 100
 PUNCTUATION = set('，。！？；：、（）【】《》〈〉「」『』“”‘’…—')
 NO_START = set('，。！？；：、）》〉】」』”’,.;:!?%)]}')
 NO_END = set('（《〈【「『“‘([{')
+SUPERSCRIPT = dict(zip('⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿ', '0123456789+-=()n'))
+SUBSCRIPT = dict(zip('₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₔ', '0123456789+-=()aeoxe'))
+HTML_ENTITIES = {'&lt;':'<', '&gt;':'>', '&amp;':'&', '&quot;':'"', '&#39;':"'", '&nbsp;':' '}
 ASCII_FALLBACK = {'，':',', '、':',', '。':'.', '！':'!', '？':'?', '；':';', '：':':',
                   '（':'(', '）':')', '【':'[', '】':']', '“':'"', '”':'"', '‘':"'", '’':"'"}
 def cjk_character(char):
@@ -203,6 +206,15 @@ class Glyphs:
             font, font_id, fallback = self.latin, 'builtin-latin', True
         else:
             equivalent = ASCII_FALLBACK.get(char, char)
+            if char in SUPERSCRIPT:
+                inner = self.box(SUPERSCRIPT[char], size * .62)
+                lift = size * .45
+                return Box(inner.width, inner.height + lift, inner.baseline + lift, inner.paths)
+            if char in SUBSCRIPT:
+                inner = self.box(SUBSCRIPT[char], size * .62)
+                drop = size * .22
+                return Box(inner.width, inner.height + drop, inner.baseline,
+                           [[(x, y + drop) for x, y in stroke] for stroke in inner.paths])
             if char in SYMBOLS:
                 box = symbol(char, size)
             elif equivalent in PUNCT_PATHS:
@@ -240,7 +252,7 @@ class Glyphs:
 
     def token(self, source, formula=False, size=None):
         # Formulas keep the base height; plain text picks the Chinese or Latin height per character.
-        size = (self.config['latin_size'] if not cjk_character(source) else self.config['size']) if size is None else size
+        size = (self.config['latin_size'] if not (formula or cjk_character(source)) else self.config['size']) if size is None else size
         before, fallback = self.used.copy(), self.fallback
         if not formula and source.isspace():
             box = Box(size * .5, size, size, [])
@@ -250,7 +262,17 @@ class Glyphs:
         # Center punctuation in its reserved space without stretching its ink.
         if cell > box.width:
             box = Box(cell, box.height, box.baseline, box.placed((cell - box.width) / 2), box.spacing)
-        return Token(('$' + source + '$') if formula else source, box, cell + (box.spacing if box.spacing is not None and not formula else self.config['spacing']),
+        if formula and cell > self.config['usable']:
+            # A display formula cannot wrap; shrink it to the writable width.
+            fit = self.config['usable'] / cell
+            if fit < .5:
+                raise ValueError('公式过宽，请拆分公式或减小字高')
+            box = Box(box.width * fit, box.height * fit, box.baseline * fit, box.placed(scale=fit), box.spacing)
+            cell = box.width
+        # Script-only formulas come from HTML <sub>/<sup> in prose: they bind to the preceding
+        # glyph, so they must not inherit the formula gap.
+        gap = 0. if formula and source.lstrip()[:1] in ('_', '^') else self.config['spacing']
+        return Token(('$' + source + '$') if formula else source, box, cell + gap,
                      dict(self.used - before), self.fallback - fallback, formula)
 
     def summary(self, tokens):
@@ -271,6 +293,8 @@ class Glyphs:
 
 def markdown_text(text):
     # Convert common prose markup; formula content passes through unchanged.
+    # Drop a YAML front matter block, but only when it starts with a `key: value` line.
+    text = re.sub(r'\A\ufeff?---[ \t]*\n[A-Za-z_][^\n:]*:[^\n]*\n(?:[^\n]*\n)*?---[ \t]*\n', '', text, count=1)
     result = []
     for kind, source in items(text):
         if kind != 'text':
@@ -279,7 +303,14 @@ def markdown_text(text):
         source = re.sub(r'^ {0,3}#{1,6}\s+', '', source, flags=re.M)
         source = re.sub(r'!?\[([^\]\n]*)\]\([^\)\n]*\)', r'\1', source)
         source = re.sub(r'\*\*([^*\n]+)\*\*|__([^_\n]+)__', lambda m: m[1] or m[2], source)
-        result.append(source.replace('$', '\\$'))
+        for entity, char in HTML_ENTITIES.items():
+            source = source.replace(entity, char)
+        source = re.sub(r'</?(?:span|small|big|em|i|b|strong|u|mark|code|kbd|var|samp|font)[^>]*>', '', source)
+        # Escape literal dollars first, then emit the script delimiters we introduce.
+        source = source.replace('$', '\\$')
+        source = re.sub(r'<sub>(.*?)</sub>', r'$_{\1}$', source, flags=re.S)
+        source = re.sub(r'<sup>(.*?)</sup>', r'$^{\1}$', source, flags=re.S)
+        result.append(source)
     return ''.join(result)
 
 
