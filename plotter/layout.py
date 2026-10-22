@@ -5,7 +5,7 @@ import pathlib
 from analysis.gfont import GFont
 from plotter.mixing import layout_mixed
 from plotter.coordinates import Coordinates, paper_svg
-from plotter.humanization import settings as humanization_settings, active as humanization_active
+from plotter.humanization import settings as humanization_settings
 
 
 def number(data, key, default, low, high):
@@ -25,28 +25,32 @@ def output_settings(data):
     available_height = height - margins['top'] - margins['bottom']
     if usable <= 0 or available_height <= 0:
         raise ValueError('边距超过纸张可用范围')
+    # `size` is the legacy shared height; it still seeds both scripts when the
+    # per-script overrides are absent.
     size = number(data, 'size', 5, 2, 20)
+    sizes = dict(en=number(data, 'size_en', size, 2, 20), zh=number(data, 'size_zh', size, 2, 20))
+    tallest = max(sizes.values())
     rows = None
     if 'rows' in data:
         rows = number(data, 'rows', 20, 1, 200)
         if rows != int(rows): raise ValueError('行数必须为整数')
         rows = int(rows)
-        if rows * size > available_height + .001:
+        if rows * tallest > available_height + .001:
             raise ValueError('指定行数与字大小超过可写高度，请减少行数、字大小或上下边距')
         pitch = available_height / rows
     else:
-        pitch = number(data, 'pitch', size * 1.8, size, 600)
-    return width, height, margins, size, rows, pitch, usable
+        pitch = number(data, 'pitch', tallest * 1.8, tallest, 600)
+    return width, height, margins, sizes, rows, pitch, usable
 
 
 def coordinate_preview(data):
-    width, height, margins, size, rows, pitch, usable = output_settings(data)
+    width, height, margins, sizes, rows, pitch, usable = output_settings(data)
     coordinates = Coordinates.from_data(data, width, height)
     metadata = coordinates.metadata()
-    metadata.update(margins=margins, size=size, rows=rows, pitch=pitch,
+    metadata.update(margins=margins, size=max(sizes.values()), sizes=sizes, rows=rows, pitch=pitch,
                     humanization=humanization_settings(data),
                     writable=[usable, height-margins['top']-margins['bottom']])
-    return dict(svg=paper_svg(coordinates, margins, rows=rows, pitch=pitch, size=size), metadata=metadata)
+    return dict(svg=paper_svg(coordinates, margins, rows=rows, pitch=pitch, size=max(sizes.values())), metadata=metadata)
 
 
 def generate(font_path, data, font_choices=None):
@@ -55,49 +59,18 @@ def generate(font_path, data, font_choices=None):
         raise ValueError('请输入 1–3000 个字符')
     if any(ord(c) < 32 and c not in '\n\r\t' for c in text):
         raise ValueError('文字包含控制字符')
-    width, height, margins, size, rows, pitch, usable = output_settings(data)
+    width, height, margins, sizes, rows, pitch, usable = output_settings(data)
+    size = max(sizes.values())
     spacing = number(data, 'spacing', size * .18, 0, 10)
     feed = number(data, 'feed', 1800, 100, 3000)
     coordinates = Coordinates.from_data(data, width, height)
     humanization = humanization_settings(data)
-    mix_metadata = {}
-    if font_choices is None and humanization_active(humanization):
+    # One renderer for both cases: a lone font is a single-choice mix, so
+    # per-script sizing, wrapping and humanization cannot drift apart.
+    if font_choices is None:
         font_choices = [dict(font_id='primary', path=pathlib.Path(font_path), weight=100.)]
-    if font_choices is not None:
-        paths, lines, mix_metadata = layout_mixed(font_choices, data, text, size, spacing, pitch, usable, GFont)
-        metrics = next(c['metrics'] for c in mix_metadata['font_mix'] if c['metrics'] is not None)
-    else:
-        lines = []
-        with GFont(font_path) as font:
-            missing = font.missing(text)
-            if missing:
-                raise ValueError('字体缺少字符：' + ''.join(missing))
-            def measure(line):
-                strokes = font.text(line, size, spacing=spacing)
-                xs = [x for s in strokes for x, y in s]
-                return max(xs, default=0) - min(xs, default=0)
-            # Character wrapping also handles Chinese and overlong English words.
-            # Prefer the most recent space when an English line fills up.
-            for paragraph in text.replace('\r\n', '\n').replace('\r', '\n').expandtabs(4).split('\n'):
-                line = ''
-                for char in paragraph:
-                    trial = line + char
-                    if measure(trial) <= usable:
-                        line = trial
-                    else:
-                        if not line or measure(char) > usable:
-                            raise ValueError('单个字符超过纸张宽度，请减小字号')
-                        split = line.rfind(' ')
-                        if split > 0 and char != ' ':
-                            lines.append(line[:split].rstrip())
-                            line = line[split + 1:] + char
-                            while measure(line) > usable:
-                                lines.append(line[:-1]); line = line[-1]
-                        else:
-                            lines.append(line.rstrip()); line = char.lstrip()
-                lines.append(line.rstrip())
-            paths = font.text('\n'.join(lines), size, spacing=spacing, line_pitch=pitch)
-            metrics = font.metrics
+    paths, lines, mix_metadata = layout_mixed(font_choices, data, text, sizes, spacing, pitch, usable, GFont)
+    metrics = next(c['metrics'] for c in mix_metadata['font_mix'] if c['metrics'] is not None)
     if rows is not None and len(lines) > rows:
         raise ValueError(f'文字需要 {len(lines)} 行，超过设定的 {rows} 行，请增加行数、宽度或减小字大小/字间距')
     points = [p for s in paths for p in s]
@@ -129,7 +102,7 @@ def generate(font_path, data, font_choices=None):
     gcode = '\n'.join(commands) + '\n'
     metadata = dict(font=pathlib.Path(font_path).name, paper=[width, height], margins=margins, margin=data.get('margin', 30), rows=rows,
                     writable=[usable, height-margins['top']-margins['bottom']],
-                    size=size, pitch=pitch, spacing=spacing, feed=feed, text=text, lines=lines,
+                    size=size, sizes=sizes, pitch=pitch, spacing=spacing, feed=feed, text=text, lines=lines,
                     bounds=bounds, machine_bounds=machine_bounds, strokes=len(paths), points=len(points), commands=len(commands),
                     xy_mm=round(travel + draw, 1), metrics=metrics,
                     sha256=hashlib.sha256(gcode.encode('ascii')).hexdigest())

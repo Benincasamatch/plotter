@@ -7,6 +7,16 @@ import secrets
 from plotter.humanization import settings, active, Variation
 
 
+# East Asian scripts share one nominal size; everything else uses the Latin size.
+CJK_RANGES = ((0x1100, 0x11FF), (0x2E80, 0x2FFF), (0x3000, 0x313F), (0x3190, 0x31FF),
+              (0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xA960, 0xA97F), (0xAC00, 0xD7AF),
+              (0xF900, 0xFAFF), (0xFE30, 0xFE4F), (0xFF00, 0xFFEF), (0x20000, 0x3FFFF))
+
+
+def is_cjk(char):
+    return any(low <= ord(char) <= high for low, high in CJK_RANGES)
+
+
 def font_choices(data, available):
     entries = data.get('font_mix')
     if entries is None:
@@ -33,7 +43,8 @@ def font_choices(data, available):
     return choices, choices[0]['path']
 
 
-def layout_mixed(choices, data, text, size, spacing, pitch, usable, loader):
+def layout_mixed(choices, data, text, sizes, spacing, pitch, usable, loader):
+    """`sizes` maps 'en'/'zh' to millimetre glyph heights."""
     seed = data.get('seed', secrets.token_hex(8))
     if isinstance(seed, bool) or not isinstance(seed, (str, int)) or not 1 <= len(str(seed)) <= 64:
         raise ValueError('混排随机种子必须是 1–64 位文本或整数')
@@ -58,8 +69,10 @@ def layout_mixed(choices, data, text, size, spacing, pitch, usable, loader):
                 paragraphs.append([])
                 continue
             if char.isspace():
-                paragraphs[-1].append(dict(char=char, font=None, paths=[], advance=size * .5, bounds=None))
+                paragraphs[-1].append(dict(char=char, font=None, paths=[], advance=sizes['en'] * .5, bounds=None,
+                                           size=sizes['en']))
                 continue
+            size = sizes['zh' if is_cjk(char) else 'en']
             options = candidates[char]
             index = rng.choices(options, weights=[choices[i]['weight'] for i in options], k=1)[0]
             if len(options) < len(enabled):
@@ -71,9 +84,10 @@ def layout_mixed(choices, data, text, size, spacing, pitch, usable, loader):
                 xs = [x for stroke in paths for x, y in stroke]
                 glyph_bounds = font.glyph(char).bounds
                 advance = max((glyph_bounds[2] - glyph_bounds[0]) * size / font.metrics['reference_height'], size * .12) + spacing
-                cache[key] = dict(char=char, font=index, paths=paths, advance=advance,
+                cache[key] = dict(char=char, font=index, paths=paths, advance=advance, size=size,
                                   bounds=(min(xs), max(xs)) if xs else None)
-            paragraphs[-1].append(variation.glyph(cache[key], size, spacing) if variation else cache[key])
+            token = cache[key]
+            paragraphs[-1].append(variation.glyph(token, token['size'], spacing) if variation else token)
 
         def measure(tokens):
             x = 0.

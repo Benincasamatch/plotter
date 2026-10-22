@@ -8,13 +8,14 @@ let lastError = '', noticeTimer, revision = 0, actionRevision = 0;
 let selectedFonts = [];
 let axisRevision = 0, axisTimer;
 let observedMotionRevision = null;
-const layoutFields=['width','height','marginTop','marginBottom','marginLeft','marginRight','rows','size','spacing','feed'];
+const mm = value => Number(value.toFixed(2)).toString();
+const layoutFields=['width','height','marginTop','marginBottom','marginLeft','marginRight','rows','sizeZh','sizeEn','spacing','feed'];
 const presetStorage='plotter.layout-presets.v1';
 const humanFields={vertical:'Vertical',scale:'Scale',rotation:'Rotation',spacing:'Spacing',baseline:'Baseline'};
 const humanDefault={enabled:false,vertical:.3,scale:5,rotation:2,spacing:.2,baseline:.4,
   vertical_enabled:true,scale_enabled:true,rotation_enabled:true,spacing_enabled:true,baseline_enabled:true};
 const humanLevels={light:[.15,3,1,.1,.2],medium:[.3,5,2,.2,.4],strong:[.6,10,4,.4,.8]};
-const defaultLayout={width:210,height:297,marginTop:30,marginBottom:30,marginLeft:30,marginRight:30,rows:20,size:5,spacing:.9,feed:1800};
+const defaultLayout={width:210,height:297,marginTop:30,marginBottom:30,marginLeft:30,marginRight:30,rows:20,sizeZh:5,sizeEn:5,spacing:.9,feed:1800};
 const builtinPresets=[{id:'a4-portrait',name:'A4 竖向 · 210 × 297',values:{...defaultLayout}},
   {id:'a4-landscape',name:'A4 横向 · 297 × 210',values:{...defaultLayout,width:297,height:210}}];
 let layoutPresets=[], selectedPreset='a4-portrait', deletedPreset=null;
@@ -74,7 +75,7 @@ function renderState(){
 }
 function invalidate(){revision++;$('origin').checked=false;currentJob=null;downloadJob=null;$('fontUsage').hidden=true;$('previewStatus').textContent='参数已修改，请重新生成路径后下载或写入。';$('count').textContent=$('text').value.length+' 字';renderState();if($('paperView').querySelector('svg'))$('phase').textContent=active()?(phases[state.phase]+' · 编辑内容未执行'):'内容已修改，请重新生成预览';}
 function coordinateSettings(){return {reverse_x:$('reverseX').checked,reverse_y:$('reverseY').checked,swap_xy:$('swapXY').checked,origin:$('originCorner').value};}
-function paperSettings(){return {width:Number($('width').value),height:Number($('height').value),margin_top:Number($('marginTop').value),margin_bottom:Number($('marginBottom').value),margin_left:Number($('marginLeft').value),margin_right:Number($('marginRight').value),rows:Number($('rows').value),size:Number($('size').value),coordinate_system:coordinateSettings(),humanization:currentHumanization()};}
+function paperSettings(){return {width:Number($('width').value),height:Number($('height').value),margin_top:Number($('marginTop').value),margin_bottom:Number($('marginBottom').value),margin_left:Number($('marginLeft').value),margin_right:Number($('marginRight').value),rows:Number($('rows').value),size_zh:Number($('sizeZh').value),size_en:Number($('sizeEn').value),coordinate_system:coordinateSettings(),humanization:currentHumanization()};}
 function currentHumanization(){
   const result={enabled:$('humanEnabled').checked};
   for(const [key,suffix] of Object.entries(humanFields)){result[key]=Number($('human'+suffix).value);result[key+'_enabled']=$('human'+suffix+'Enabled').checked;}
@@ -117,7 +118,10 @@ function displayPaper(svg, metadata, preservePaths=false){
   $('paperView').style.aspectRatio=metadata.preview_size[0]+'/'+metadata.preview_size[1];
   $('paperLabel').textContent=`范围 / ${metadata.paper[0]} × ${metadata.paper[1]} mm`;
   renderCoordinateInfo(metadata);
-  if(metadata.writable)$('layoutSummary').textContent=`可写范围 ${metadata.writable[0].toFixed(1)} × ${metadata.writable[1].toFixed(1)} mm · ${metadata.rows} 行 · 自动行距 ${metadata.pitch.toFixed(2)} mm`;
+  if(metadata.writable){
+    const sizes=metadata.sizes?`中文 ${mm(metadata.sizes.zh)} mm / 英文 ${mm(metadata.sizes.en)} mm · `:'';
+    $('layoutSummary').textContent=`${sizes}可写范围 ${metadata.writable[0].toFixed(1)} × ${metadata.writable[1].toFixed(1)} mm · ${metadata.rows} 行 · 自动行距 ${metadata.pitch.toFixed(2)} mm`;
+  }
 
 }
 async function refreshCoordinatePreview(){
@@ -130,14 +134,22 @@ async function refreshCoordinatePreview(){
 }
 function coordinateChanged(){invalidate();$('origin').checked=false;clearTimeout(axisTimer);axisTimer=setTimeout(refreshCoordinatePreview,150);}
 function findPreset(){return [...builtinPresets,...layoutPresets].find(p=>p.id===selectedPreset);}
-function validPresetValues(values){
+// Presets saved before per-script sizing carry one shared `size`; expand it so
+// existing browser storage keeps loading with both scripts at their old height.
+function migratePresetValues(values){
+  if(!values||typeof values!=='object'||typeof values.size!=='number')return values;
+  const {size,...rest}=values;
+  return {...rest,sizeZh:values.sizeZh??size,sizeEn:values.sizeEn??size};
+}
+function validPresetValues(raw){
+  const values=migratePresetValues(raw);
   if(!values||typeof values!=='object')return false;
   for(const key of layoutFields){
     const value=values[key], input=$(key);
     if(typeof value!=='number'||!Number.isFinite(value)||value<Number(input.min)||value>Number(input.max))return false;
   }
   return Number.isInteger(values.rows)&&values.width>values.marginLeft+values.marginRight&&
-    values.height-values.marginTop-values.marginBottom>=values.rows*values.size;
+    values.height-values.marginTop-values.marginBottom>=values.rows*Math.max(values.sizeZh,values.sizeEn);
 }
 function currentLayout(){return Object.fromEntries(layoutFields.map(key=>[key,Number($(key).value)]));}
 function renderPresets(){
@@ -152,8 +164,8 @@ function renderPresets(){
   updatePresetHint();
 }
 function updatePresetHint(){
-  const preset=findPreset(), values=currentLayout();
-  const dirty=preset&&(layoutFields.some(key=>values[key]!==preset.values[key])||!sameHumanization(currentHumanization(),preset.humanization||humanDefault));
+  const preset=findPreset(), values=currentLayout(), saved=preset&&migratePresetValues(preset.values);
+  const dirty=preset&&(layoutFields.some(key=>values[key]!==saved[key])||!sameHumanization(currentHumanization(),preset.humanization||humanDefault));
   $('presetHint').textContent=(dirty?'参数已修改，尚未保存。':'当前参数已载入预设。')+
     '保存页面排版、速度与仿真参数；仅保存在当前浏览器。';
 }
@@ -162,7 +174,8 @@ function storePresets(presets=layoutPresets, selected=selectedPreset){
 }
 function applyPreset(preset){
   selectedPreset=preset.id;
-  for(const key of layoutFields)$(key).value=preset.values[key];
+  const values=migratePresetValues(preset.values);
+  for(const key of layoutFields)$(key).value=values[key];
   setHumanization(preset.humanization||humanDefault);
   $('presetName').value=layoutPresets.includes(preset)?preset.name:'';
   renderPresets();coordinateChanged();
@@ -179,8 +192,8 @@ function restorePresets(){
       if([...builtinPresets,...layoutPresets].some(p=>p.id===saved.selected))selectedPreset=saved.selected;
     }
   }catch(error){/* Invalid or unavailable browser storage leaves built-in presets usable. */}
-  const preset=findPreset();
-  for(const key of layoutFields)$(key).value=preset.values[key];
+  const preset=findPreset(), values=migratePresetValues(preset.values);
+  for(const key of layoutFields)$(key).value=values[key];
   setHumanization(preset.humanization||humanDefault);
   $('presetName').value=layoutPresets.includes(preset)?preset.name:'';renderPresets();
 }
@@ -296,9 +309,12 @@ function renderFontMix(){
   updateProbabilities();
 }
 function renderFontUsage(metadata){
+  const mix=metadata.font_mix||[];
+  // A single font neither mixes nor redistributes, so the panel would only add noise.
+  if(mix.length<2&&!metadata.character_variations){$('fontUsage').hidden=true;$('fontUsage').replaceChildren();return;}
   $('fontUsage').replaceChildren();
   const title=document.createElement('p');title.className='font-usage-title';title.textContent='本次预览的实际字体分布';$('fontUsage').append(title);
-  for(const item of metadata.font_mix||[]){
+  for(const item of mix){
     const row=document.createElement('div');row.className='font-usage-row';
     const name=document.createElement('span');name.textContent=fonts.find(f=>f.id===item.font_id)?.name||item.font;name.title=name.textContent;
     const count=document.createElement('span');count.textContent=`${item.used} 字 · ${(100*item.actual_probability).toFixed(1)}%`;row.append(name,count);$('fontUsage').append(row);
@@ -348,7 +364,7 @@ $('preview').onclick=()=>action(async()=>{
     $('previewStatus').textContent='当前路径已生成，下载与写入使用此预览的坐标设置。';
     $('paperLabel').textContent=`范围 / ${data.width} × ${data.height} mm`;
     const m=result.metadata;$('metrics').replaceChildren();
-    for(const value of [`${m.lines.length} / ${m.rows} 行 · ${m.strokes} 笔画`,`${m.commands} 条指令`,`${m.xy_mm} mm 路程`]){const span=document.createElement('span');span.textContent=value;$('metrics').append(span);}
+    for(const value of [`${m.lines.length} / ${m.rows} 行 · ${m.strokes} 笔画`,m.sizes?`中 ${mm(m.sizes.zh)} / 英 ${mm(m.sizes.en)} mm`:'',`${m.commands} 条指令`,`${m.xy_mm} mm 路程`].filter(Boolean)){const span=document.createElement('span');span.textContent=value;$('metrics').append(span);}
     renderFontUsage(m);
     notice('路径已生成，可以下载或开始写字');
   }finally{$('preview').disabled=false;}
@@ -414,7 +430,7 @@ $('undoFontPreset').onclick=()=>{
   if(usable)applyFontPreset(preset);else renderFontPresets();notice('字体预设已恢复');
 };
 for(const key of ['text','spacing','feed'])$(key).addEventListener('input',invalidate);
-for(const key of ['width','height','marginTop','marginBottom','marginLeft','marginRight','rows','size'])$(key).addEventListener('input',coordinateChanged);
+for(const key of ['width','height','marginTop','marginBottom','marginLeft','marginRight','rows','sizeZh','sizeEn'])$(key).addEventListener('input',coordinateChanged);
 for(const key of layoutFields)$(key).addEventListener('input',updatePresetHint);
 $('humanEnabled').onchange=humanizationChanged;
 for(const suffix of Object.values(humanFields)){

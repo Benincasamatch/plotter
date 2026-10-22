@@ -55,7 +55,7 @@ $('deviceName').addEventListener('keydown',event=>{if(event.key==='Enter'){event
 let axisRevision = 0, axisTimer;
 let observedMotionRevision = null;
 let speedTimer, speedPending=null, speedSending=false, speedJob=null;
-const layoutFields=['width','height','marginTop','marginBottom','marginLeft','marginRight','rows','size','spacing','feed','moveFeed','punctuationWidth','gridColumns','gridRowGap','gridColumnGap','gridSizePercent','gridPadding'];
+const layoutFields=['width','height','marginTop','marginBottom','marginLeft','marginRight','rows','size','latinSize','spacing','feed','moveFeed','punctuationWidth','gridColumns','gridRowGap','gridColumnGap','gridSizePercent','gridPadding'];
 let presetStorage='plotter.layout-presets.v1';
 let layoutMode='', modeDrafts={}, sourcePages=[$('text').value], sourceIndex=0, documentResult=null, outputIndex=0;
 const startedJobs=new Set();
@@ -63,7 +63,7 @@ const humanFields={vertical:'Vertical',scale:'Scale',rotation:'Rotation',spacing
 const humanDefault={enabled:false,vertical:.3,scale:5,rotation:2,spacing:.2,baseline:.4,
   vertical_enabled:true,scale_enabled:true,rotation_enabled:true,spacing_enabled:true,baseline_enabled:true};
 const humanLevels={light:[.15,3,1,.1,.2],medium:[.3,5,2,.2,.4],strong:[.6,10,4,.4,.8]};
-const defaultLayout={width:210,height:297,marginTop:30,marginBottom:30,marginLeft:30,marginRight:30,rows:20,size:5,spacing:.9,feed:1800,moveFeed:3000,punctuationWidth:.8,gridColumns:20,gridRowGap:2.9,gridColumnGap:0,gridSizePercent:80,gridPadding:.3};
+const defaultLayout={width:210,height:297,marginTop:30,marginBottom:30,marginLeft:30,marginRight:30,rows:20,size:5,latinSize:5,spacing:.9,feed:1800,moveFeed:3000,punctuationWidth:.8,gridColumns:20,gridRowGap:2.9,gridColumnGap:0,gridSizePercent:80,gridPadding:.3};
 const notebookPresets=[{id:'a4-portrait',name:'A4 竖向 · 210 × 297',values:{...defaultLayout}},
   {id:'a4-landscape',name:'A4 横向 · 297 × 210',values:{...defaultLayout,width:297,height:210}}];
 const gridPresets=[{id:'a4-grid',name:'A4 方格 · 20 行 × 20 列',values:{...defaultLayout,marginTop:41,marginBottom:41,marginLeft:26.5,marginRight:26.5}}];
@@ -194,7 +194,7 @@ function renderState(){
 }
 function invalidate(){sourcePages[sourceIndex]=$('text').value;revision++;$('origin').checked=false;currentJob=null;downloadJob=null;documentResult=null;renderOutputNavigation();$('fontUsage').hidden=true;$('previewStatus').textContent='参数已修改，请重新生成全部页面后下载或写入。';updateCount();renderState();if($('paperView').querySelector('svg'))$('phase').textContent=active()?(phases[state.phase]+' · 编辑内容未执行'):'内容已修改，请重新生成预览';}
 function coordinateSettings(){return {reverse_x:$('reverseX').checked,reverse_y:$('reverseY').checked,swap_xy:$('swapXY').checked,origin:$('originCorner').value};}
-function paperSettings(){syncNotebookSizing();return {line_sizing:$('lineSizing').value,line_looseness:Number($('lineLooseness').value),layout_mode:layoutMode||'notebook',pagination:$('pagination').value,width:Number($('width').value),height:Number($('height').value),margin_top:Number($('marginTop').value),margin_bottom:Number($('marginBottom').value),margin_left:Number($('marginLeft').value),margin_right:Number($('marginRight').value),rows:Number($('rows').value),size:Number($('size').value),punctuation_width:Number($('punctuationWidth').value),grid:{columns:Number($('gridColumns').value),row_gap:Number($('gridRowGap').value),column_gap:Number($('gridColumnGap').value),size_percent:Number($('gridSizePercent').value),padding:Number($('gridPadding').value),draw_lines:$('gridDrawLines').checked},coordinate_system:coordinateSettings(),device_port:profilePort,device_control:deviceControl(),humanization:currentHumanization()};}
+function paperSettings(){syncNotebookSizing();return {line_sizing:$('lineSizing').value,line_looseness:Number($('lineLooseness').value),layout_mode:layoutMode||'notebook',pagination:$('pagination').value,width:Number($('width').value),height:Number($('height').value),margin_top:Number($('marginTop').value),margin_bottom:Number($('marginBottom').value),margin_left:Number($('marginLeft').value),margin_right:Number($('marginRight').value),rows:Number($('rows').value),size:Number($('size').value),latin_size:Number($('latinSize').value),punctuation_width:Number($('punctuationWidth').value),grid:{columns:Number($('gridColumns').value),row_gap:Number($('gridRowGap').value),column_gap:Number($('gridColumnGap').value),size_percent:Number($('gridSizePercent').value),padding:Number($('gridPadding').value),draw_lines:$('gridDrawLines').checked},coordinate_system:coordinateSettings(),device_port:profilePort,device_control:deviceControl(),humanization:currentHumanization()};}
 function currentHumanization(){
   const result={enabled:$('humanEnabled').checked};
   for(const [key,suffix] of Object.entries(humanFields)){result[key]=Number($('human'+suffix).value);result[key+'_enabled']=$('human'+suffix+'Enabled').checked;}
@@ -237,7 +237,7 @@ function displayPaper(svg, metadata, preservePaths=false){
   $('paperView').style.aspectRatio=metadata.preview_size[0]+'/'+metadata.preview_size[1];
   $('paperLabel').textContent=`范围 / ${metadata.paper[0]} × ${metadata.paper[1]} mm`;
   renderCoordinateInfo(metadata);
-  if(metadata.writable)$('layoutSummary').textContent=metadata.layout_mode==='grid'?`可写范围 ${metadata.writable[0].toFixed(1)} × ${metadata.writable[1].toFixed(1)} mm · 格宽 ${metadata.grid.cell_width.toFixed(3)} / 格高 ${metadata.grid.cell_height.toFixed(3)} mm · ${metadata.rows} 行 × ${metadata.grid.columns} 列`:`可写范围 ${metadata.writable[0].toFixed(1)} × ${metadata.writable[1].toFixed(1)} mm · 每页 ${metadata.rows} 行 · 行距 ${metadata.pitch.toFixed(2)} mm`;
+  if(metadata.writable)$('layoutSummary').textContent=metadata.layout_mode==='grid'?`可写范围 ${metadata.writable[0].toFixed(1)} × ${metadata.writable[1].toFixed(1)} mm · 格宽 ${metadata.grid.cell_width.toFixed(3)} / 格高 ${metadata.grid.cell_height.toFixed(3)} mm · ${metadata.rows} 行 × ${metadata.grid.columns} 列`:`可写范围 ${metadata.writable[0].toFixed(1)} × ${metadata.writable[1].toFixed(1)} mm · 每页 ${metadata.rows} 行 · 行距 ${metadata.pitch.toFixed(2)} mm · 中文字高 ${metadata.size.toFixed(2)} / 英文 ${(metadata.latin_size??metadata.size).toFixed(2)} mm`;
 
 }
 async function refreshCoordinatePreview(){
@@ -253,23 +253,26 @@ function notebookSizing(){return {lineSizing:$('lineSizing').value,lineLooseness
 function validNotebookSizing(value){return (value.lineSizing===undefined||['rows','size'].includes(value.lineSizing))&&(value.lineLooseness===undefined||(typeof value.lineLooseness==='number'&&Number.isFinite(value.lineLooseness)&&value.lineLooseness>=1&&value.lineLooseness<=4));}
 function restoreNotebookSizing(value){
   $('lineSizing').value=value.lineSizing||'rows';
-  const v=value.values||currentLayout(),ratio=(v.height-v.marginTop-v.marginBottom)/v.rows/v.size;
+  const v=value.values||currentLayout(),ratio=(v.height-v.marginTop-v.marginBottom)/v.rows/Math.max(v.size,v.latinSize||v.size);
   $('lineLooseness').value=value.lineLooseness??Math.max(1,Math.min(4,Math.round(ratio*100)/100));
   syncNotebookSizing();
 }
 function syncNotebookSizing(){
   const notebook=layoutMode!=='grid',mode=$('lineSizing').value;
-  $('rows').readOnly=notebook&&mode==='size';$('size').readOnly=notebook&&mode==='rows';
+  $('rows').readOnly=notebook&&mode==='size';$('size').readOnly=notebook&&mode==='rows';$('latinSize').readOnly=$('size').readOnly;
   $('rows').closest('label').firstChild.textContent=$('rows').readOnly?'每页行数（自动）':'每页行数';
-  $('size').closest('label').firstChild.textContent=$('size').readOnly?'字高 / mm（自动）':'字高 / mm';
-  $('rows').title=$('rows').readOnly?'根据字高和松紧自动计算':'';$('size').title=$('size').readOnly?'根据行数和松紧自动计算':'';
+  $('size').closest('label').firstChild.textContent=$('size').readOnly?'中文字高 / mm（自动）':'中文字高 / mm';
+  $('latinSize').closest('label').firstChild.textContent=$('latinSize').readOnly?'英文字高 / mm（自动）':'英文字高 / mm';
+  $('rows').title=$('rows').readOnly?'根据字高和松紧自动计算':'';
+  $('size').title=$('size').readOnly?'根据行数和松紧自动计算':'';
+  $('latinSize').title=$('size').readOnly?'跟随中文字高按当前比例自动缩放':'';
   if(!notebook)return;
   const ratio=Number($('lineLooseness').value);
   $('lineLoosenessValue').textContent=ratio.toFixed(2)+' 倍行距';
   try{
     const result=window.NotebookSizing.compute(currentLayout(),mode,ratio);
-    if(mode==='rows')$('size').value=Number(result.size.toFixed(6));else $('rows').value=result.rows;
-    $('lineSizingHint').textContent=`${mode==='rows'?'行数固定，拖动滑块调整自动字高':'字高固定，拖动滑块调整行距和自动行数'}：${result.rows} 行 · 字高 ${result.size.toFixed(2)} mm · 行距 ${result.pitch.toFixed(2)} mm · 行间留白 ${result.gap.toFixed(2)} mm。`;
+    if(mode==='rows'){$('size').value=Number(result.size.toFixed(6));$('latinSize').value=Number(result.latinSize.toFixed(6));}else $('rows').value=result.rows;
+    $('lineSizingHint').textContent=`${mode==='rows'?'行数固定，拖动滑块调整自动字高':'字高固定，拖动滑块调整行距和自动行数'}：${result.rows} 行 · 中文 ${result.size.toFixed(2)} / 英文 ${result.latinSize.toFixed(2)} mm · 行距 ${result.pitch.toFixed(2)} mm · 行间留白 ${result.gap.toFixed(2)} mm。`;
   }catch(error){$('lineSizingHint').textContent=error.message;}
 }
 function coordinateChanged(){syncNotebookSizing();invalidate();$('origin').checked=false;clearTimeout(axisTimer);axisTimer=setTimeout(refreshCoordinatePreview,150);}
@@ -282,7 +285,7 @@ function validPresetValues(values,mode=layoutMode||'notebook'){
   }
   if(!Number.isInteger(values.rows)||!Number.isInteger(values.gridColumns)||values.width<=values.marginLeft+values.marginRight)return false;
   const height=values.height-values.marginTop-values.marginBottom;
-  return mode==='notebook'?height+.001>=values.rows*values.size:
+  return mode==='notebook'?height+.001>=values.rows*Math.max(values.size,values.latinSize):
     Math.min((values.width-values.marginLeft-values.marginRight-(values.gridColumns-1)*values.gridColumnGap)/values.gridColumns,(height-(values.rows-1)*values.gridRowGap)/values.rows)>2*values.gridPadding+.2;
 }
 function currentLayout(){return Object.fromEntries(layoutFields.map(key=>[key,Number($(key).value)]));}
@@ -299,7 +302,7 @@ function renderPresets(){
 }
 function updatePresetHint(){
   const preset=findPreset(), values=currentLayout();
-  const oldRatio=preset?(preset.values.height-preset.values.marginTop-preset.values.marginBottom)/preset.values.rows/preset.values.size:2.37;
+  const oldRatio=preset?(preset.values.height-preset.values.marginTop-preset.values.marginBottom)/preset.values.rows/Math.max(preset.values.size,preset.values.latinSize):2.37;
   const savedRatio=preset?.lineLooseness??Math.max(1,Math.min(4,Math.round(oldRatio*100)/100));
   const dirty=preset&&(layoutFields.some(key=>values[key]!==preset.values[key])||(layoutMode!=='grid'&&((preset.lineSizing||'rows')!==$('lineSizing').value||savedRatio!==Number($('lineLooseness').value)))||$('gridDrawLines').checked!==Boolean(preset.drawLines)||!sameHumanization(currentHumanization(),preset.humanization||humanDefault));
   $('presetHint').textContent=(dirty?'参数已修改，尚未保存。':'当前参数已载入预设。')+
@@ -323,7 +326,7 @@ function restorePresets(){
     if(saved&&Array.isArray(saved.presets)){
       const ids=new Set(builtinPresets.map(p=>p.id)), names=new Set();
       layoutPresets=saved.presets.slice(0,50).filter(p=>{
-        if(p&&p.values&&typeof p.values==='object')p.values={...defaultLayout,...p.values};
+        if(p&&p.values&&typeof p.values==='object')p.values={...defaultLayout,...p.values,latinSize:p.values.latinSize??p.values.size??defaultLayout.latinSize};
         if(!p||typeof p.id!=='string'||!p.id||p.id.length>100||ids.has(p.id)||typeof p.name!=='string'||!p.name.trim()||p.name.length>40||names.has(p.name)||!validPresetValues(p.values)||!validNotebookSizing(p)||(p.humanization!==undefined&&!validHumanization(p.humanization)))return false;
         ids.add(p.id);names.add(p.name);return true;
       });
@@ -534,7 +537,7 @@ function setMode(mode){
   }
   $('gridOptions').hidden=mode!=='grid';$('notebookOptions').hidden=mode!=='notebook';
   sizingPanel.hidden=mode!=='notebook';
-  for(const key of ['size','spacing'])$(key).closest('label').hidden=mode==='grid';
+  for(const key of ['size','latinSize','spacing'])$(key).closest('label').hidden=mode==='grid';
   $('modeHint').textContent=mode==='grid'?'表格模式：普通字符逐格居中，公式占连续多格；预设与笔记模式独立。':'笔记模式：按宽度换行，支持中文标点留白与公式；预设与表格模式独立。';
   try{localStorage.setItem('plotter.layout-mode.v1',mode);}catch(error){/* Mode remains usable without storage. */}
   coordinateChanged();
@@ -679,7 +682,7 @@ $('undoFontPreset').onclick=()=>{
 for(const key of ['text','spacing','feed','moveFeed'])$(key).addEventListener('input',invalidate);
 $('lineSizing').onchange=()=>{coordinateChanged();updatePresetHint();};
 $('lineLooseness').addEventListener('input',()=>{coordinateChanged();updatePresetHint();});
-for(const key of ['width','height','marginTop','marginBottom','marginLeft','marginRight','rows','size'])$(key).addEventListener('input',coordinateChanged);
+for(const key of ['width','height','marginTop','marginBottom','marginLeft','marginRight','rows','size','latinSize'])$(key).addEventListener('input',coordinateChanged);
 for(const key of ['punctuationWidth','gridColumns','gridRowGap','gridColumnGap','gridSizePercent','gridPadding'])$(key).addEventListener('input',coordinateChanged);
 $('gridDrawLines').onchange=()=>{coordinateChanged();updatePresetHint();};
 for(const key of layoutFields)$(key).addEventListener('input',updatePresetHint);

@@ -24,6 +24,13 @@ NO_START = set('，。！？；：、）》〉】」』”’,.;:!?%)]}')
 NO_END = set('（《〈【「『“‘([{')
 ASCII_FALLBACK = {'，':',', '、':',', '。':'.', '！':'!', '？':'?', '；':';', '：':':',
                   '（':'(', '）':')', '【':'[', '】':']', '“':'"', '”':'"', '‘':"'", '’':"'"}
+def cjk_character(char):
+    """CJK ideographs, kana-width punctuation and fullwidth forms share the Chinese em box."""
+    code = ord(char)
+    return (0x3000 <= code <= 0x303f or 0x3400 <= code <= 0x9fff or 0xf900 <= code <= 0xfaff or
+            0xff00 <= code <= 0xffef or 0x20000 <= code <= 0x323af or char in PUNCTUATION)
+
+
 PUNCT_PATHS = {
     '(': [[(.65,0),(.35,.2),(.25,.5),(.35,.8),(.65,1)]],
     ')': [[(.35,0),(.65,.2),(.75,.5),(.65,.8),(.35,1)]],
@@ -56,23 +63,31 @@ def configuration(data):
     looseness = number(data, 'line_looseness', 2, 1, 4) if sizing is not None else None
     if mode == 'grid' or sizing is not None:
         base.pop('rows', None)
+    requested = number(data, 'size', 5, 2, 20)
+    # Grid cells scale every glyph to the cell, so only notebook mode keeps two heights.
+    ratio = number(data, 'latin_size', requested, 2, 20) / requested if mode == 'notebook' else 1.
     if sizing == 'rows':
         base.pop('size', None)
     width, height, margins, size, rows, pitch, usable = output_settings(base)
+    latin_size = size * ratio
     rows = integer(data, 'rows', 20, 1, 200) if sizing != 'size' else 1
     available = height - margins['top'] - margins['bottom']
     if mode == 'notebook':
         if sizing == 'rows':
             pitch = available / rows
+            # The Chinese height stays the reference; English follows the requested ratio.
             size = pitch / looseness
-            if not 2 <= size <= 20:
-                raise ValueError('自动字高须为 2–20 mm，请调整行数、松紧或上下边距')
+            latin_size = size * ratio
+            if not 2 <= min(size, latin_size) or max(size, latin_size) > 20:
+                raise ValueError('自动字高须使中英文都在 2–20 mm，请调整行数、松紧或上下边距')
+            if latin_size > pitch + .001:
+                raise ValueError('英文字高超过行距，请减小英文字高或放宽行间松紧')
         elif sizing == 'size':
-            pitch = size * looseness
+            pitch = max(size, latin_size) * looseness
             rows = math.floor((available + .000001) / pitch)
             if not 1 <= rows <= 200:
                 raise ValueError('自动行数须为 1–200 行，请调整字高、松紧或上下边距')
-        elif rows * size > available + .001:
+        elif rows * max(size, latin_size) > available + .001:
             raise ValueError('指定行数与字大小超过可写高度')
         else:
             pitch = available / rows
@@ -93,7 +108,7 @@ def configuration(data):
     pagination = data.get('pagination', 'auto')
     if pagination not in ('auto', 'fixed'):
         raise ValueError('分页方式必须是自动续页或固定每页内容')
-    return dict(mode=mode, width=width, height=height, margins=margins, size=size, rows=rows,
+    return dict(mode=mode, width=width, height=height, margins=margins, size=size, latin_size=latin_size, rows=rows,
                 pitch=pitch, usable=usable, available=available, grid=grid, pagination=pagination,
                 line_sizing=sizing, line_looseness=looseness,
                 punctuation_width=number(data, 'punctuation_width', .8, 0, 2),
@@ -133,7 +148,7 @@ def grid_paths(config):
 def preview_svg(config, coordinates, paths=(), row_guides=None):
     svg = paper_svg(coordinates, config['margins'], paths,
                     rows=config['rows'] if config['mode'] == 'notebook' else None,
-                    pitch=config['pitch'], size=config['size'], row_guides=row_guides)
+                    pitch=config['pitch'], size=max(config['size'], config['latin_size']), row_guides=row_guides)
     if config['mode'] == 'grid':
         lines = ['<g id="grid-guides" stroke="#a2aaa2" stroke-width=".2" fill="none">']
         for stroke in grid_paths(config):
@@ -148,7 +163,7 @@ def coordinate_preview(data):
     coordinates = Coordinates.from_data(data, c['width'], c['height'])
     metadata = coordinates.metadata()
     metadata['device_control'] = c['device_control']
-    metadata.update(layout_mode=c['mode'], margins=c['margins'], size=c['size'], rows=c['rows'],
+    metadata.update(layout_mode=c['mode'], margins=c['margins'], size=c['size'], latin_size=c['latin_size'], rows=c['rows'],
                     line_sizing=c['line_sizing'], line_looseness=c['line_looseness'],
                     pitch=c['pitch'], grid=c['grid'], humanization=c['humanization'],
                     writable=[c['usable'], c['available']], punctuation_width=c['punctuation_width'])
@@ -223,7 +238,8 @@ class Glyphs:
         return Box(width, bottom - top, baseline, [[(x, y - top) for x, y in s] for s in paths], gap)
 
     def token(self, source, formula=False, size=None):
-        size = self.config['size'] if size is None else size
+        # Formulas keep the base height; plain text picks the Chinese or Latin height per character.
+        size = (self.config['latin_size'] if not cjk_character(source) else self.config['size']) if size is None else size
         before, fallback = self.used.copy(), self.fallback
         if not formula and source.isspace():
             box = Box(size * .5, size, size, [])
@@ -293,7 +309,7 @@ def text_width(tokens):
 def plain_line_drift(config):
     human=config.get('humanization',{})
     drift=human.get('baseline',0.) if human.get('enabled') and human.get('baseline_enabled',True) else 0.
-    return min(drift,max(0.,(config['pitch']-config['size'])/2))
+    return min(drift,max(0.,(config['pitch']-max(config['size'],config['latin_size']))/2))
 
 
 def prepare_notebook_tokens(tokens, config):
@@ -379,11 +395,11 @@ def notebook_pages(tokens, config, glyphs):
     rows = notebook_rows(tokens, config)
     pages, paths, page_tokens, lines = [], [], [], []
     def default_guides():
-        return {i: round(config['margins']['top'] + i * config['pitch'] + config['size'], 3) for i in range(config['rows'])}
+        return {i: round(config['margins']['top'] + i * config['pitch'] + max(config['size'], config['latin_size']), 3) for i in range(config['rows'])}
     guides = default_guides()
     row_cursor = 0
     for line in rows:
-        baseline = max((t.box.baseline for t in line), default=config['size'])
+        baseline = max((t.box.baseline for t in line), default=max(config['size'], config['latin_size']))
         descent = max((t.box.height - t.box.baseline for t in line), default=0.)
         height = baseline + descent
         drift_amplitude = glyphs.variation.amplitude('baseline') if glyphs.variation else 0.
@@ -405,7 +421,7 @@ def notebook_pages(tokens, config, glyphs):
             row_paths.extend(token.box.placed(x, y + baseline - token.box.baseline + drift + drift_amplitude))
             x += token.advance
         paths.extend(row_paths)
-        guides[row_cursor] = round(max((py for stroke in row_paths for _, py in stroke), default=y + config['size']), 3)
+        guides[row_cursor] = round(max((py for stroke in row_paths for _, py in stroke), default=y + max(config['size'], config['latin_size'])), 3)
         for occupied in range(row_cursor + 1, row_cursor + slots):
             guides.pop(occupied, None)
         page_tokens.extend(line); lines.append(''.join(t.source for t in line)); row_cursor += slots
@@ -494,7 +510,7 @@ def emit(config, data, paper_paths, lines, tokens, glyphs, seed, source_page, ro
         metadata['device_port'] = config['device_port']
     metadata.update(layout_mode=config['mode'], margins=config['margins'], writable=[config['usable'], config['available']],
                     line_sizing=config['line_sizing'], line_looseness=config['line_looseness'], row_guides=row_guides,
-                    rows=config['rows'], size=config['size'], pitch=config['pitch'], spacing=config['spacing'], feed=config['feed'], move_feed=config['move_feed'],
+                    rows=config['rows'], size=config['size'], latin_size=config['latin_size'], pitch=config['pitch'], spacing=config['spacing'], feed=config['feed'], move_feed=config['move_feed'],
                     grid=config['grid'], punctuation_width=config['punctuation_width'], humanization=config['humanization'],
                     seed=seed, source_page=source_page, lines=lines, text='\n'.join(lines), bounds=bounds, machine_bounds=machine_bounds,
                     strokes=len(paths), points=len(points), commands=len(commands), xy_mm=round(travel + draw + math.dist(last,(0,0)), 1),

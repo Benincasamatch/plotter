@@ -60,6 +60,9 @@ def generate(font_path, data, font_choices=None):
     if any(ord(c) < 32 and c not in '\n\r\t' for c in text):
         raise ValueError('文字包含控制字符')
     width, height, margins, size, rows, pitch, usable = output_settings(data)
+    # Separate Chinese/Latin heights belong to the document layout; refuse to ignore them here.
+    if number(data, 'latin_size', size, 2, 20) != size:
+        raise ValueError('分设中英文字高需要笔记或表格排版，请在前端选择排版模式后重新生成')
     spacing = number(data, 'spacing', size * .18, 0, 10)
     feed = number(data, 'feed', 1800, 100, MAX_FEED)
     move_feed = number(data, 'move_feed', 3000, 100, MAX_FEED)
