@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿. (Join-Path $PSScriptRoot 'deploy-git-rollback.ps1')
 $ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $taskRoot='C:\Users\102\plotter-web-20261014'
@@ -18,11 +18,8 @@ function Listener-Pid([int]$taskPort){
 }
 $taskWebPid=Listener-Pid 8080
 $taskControllerPid=Listener-Pid 8090
-$taskBackup=Join-Path $taskDeploy ('backups\before-workbench-type-'+(Get-Date -Format yyyyMMddHHmmss))
-New-Item -ItemType Directory -Path $taskBackup | Out-Null
-$taskOldFiles=@($taskManifest.expected.PSObject.Properties.Name)
-tar -cf (Join-Path $taskBackup 'before.tar') -C $taskRelease @taskOldFiles
-if($LASTEXITCODE -ne 0){throw 'Backup failed'}
+$taskDeployed=@($taskManifest.expected.PSObject.Properties.Name)
+$null=Assert-CleanSource -Root $taskRoot -Relative $taskDeployed
 try{
  tar -xf $taskPackage -C $taskRelease
  if($LASTEXITCODE -ne 0){throw 'Extraction failed'}
@@ -34,10 +31,9 @@ try{
   if($taskResponse.Headers['Content-Type'] -notmatch 'text/css'){throw 'CSS serving failed'}
  }
  if((Listener-Pid 8080) -ne $taskWebPid -or (Listener-Pid 8090) -ne $taskControllerPid){throw 'Service process changed'}
- [pscustomobject]@{Result='UPDATED';Backup=$taskBackup;BackendPid=$taskWebPid;ControllerPid=$taskControllerPid;Files=$taskManifest.files}|ConvertTo-Json -Depth 5 | Tee-Object -FilePath (Join-Path $taskBackup 'result.json')
+ [pscustomobject]@{Result='UPDATED';BackendPid=$taskWebPid;ControllerPid=$taskControllerPid;Files=$taskManifest.files}|ConvertTo-Json -Depth 5 | Out-String | Write-Output
 }catch{
  $taskFailure=$_
- tar -xf (Join-Path $taskBackup 'before.tar') -C $taskRelease
- if($LASTEXITCODE -ne 0){throw 'Rollback failed'}
+ Restore-CommittedFiles -Root $taskRoot -Relative $taskDeployed
  throw $taskFailure
 }

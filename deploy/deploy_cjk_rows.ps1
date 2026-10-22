@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference='Stop'
+﻿. (Join-Path $PSScriptRoot 'deploy-git-rollback.ps1')
 $ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $taskRoot='C:\Users\102\plotter-web-20261014'
@@ -9,8 +9,7 @@ $taskPackage=Join-Path $taskRoot 'deploy\cjk-rows-20261020.tar'
 if ((Get-FileHash -LiteralPath $taskPackage -Algorithm SHA256).Hash -ne '5311651D983E19252591F7F4587CFFA9B0453D7E28F718145D1C0751448C4911') { throw 'Package hash mismatch.' }
 $taskStamp=Get-Date -Format yyyyMMddHHmmss
 $taskStage=Join-Path $taskRoot ('deploy\cjk-rows-stage-'+$taskStamp)
-$taskBackup=Join-Path $taskRoot ('deploy\backups\before-cjk-rows-'+$taskStamp)
-New-Item -ItemType Directory -Path $taskStage,$taskBackup | Out-Null
+New-Item -ItemType Directory -Path $taskStage | Out-Null
 tar -xf $taskPackage -C $taskStage
 if ($LASTEXITCODE -ne 0) { throw 'Staging failed.' }
 $taskFiles=@('backend/document.py','backend/gfont.py')
@@ -24,11 +23,9 @@ foreach($taskFile in $taskFiles){
         $taskExisting+=,$taskFile
     }elseif(Test-Path -LiteralPath (Join-Path $taskRelease $taskFile)){throw ('New file already exists: '+$taskFile)}
 }
-tar -cf (Join-Path $taskBackup 'files-before.tar') -C $taskRelease @taskExisting
 if ($LASTEXITCODE -ne 0) { throw 'Backup failed.' }
 $taskControllerPid=(Get-NetTCPConnection -LocalPort 8090 -State Listen | Select-Object -First 1).OwningProcess
 $taskBefore=Invoke-RestMethod http://127.0.0.1:8080/api/state -TimeoutSec 10
-$taskBefore | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $taskBackup 'state-before.json') -Encoding UTF8
 function Stop-Backend {
     $taskListener=Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
     if($taskListener){
@@ -40,7 +37,9 @@ function Stop-Backend {
 }
 function Wait-Backend {
     $taskDeadline=(Get-Date).AddSeconds(30)
-    do {try{return Invoke-RestMethod http://127.0.0.1:8080/api/state -TimeoutSec 3}catch{Start-Sleep -Milliseconds 300}} while((Get-Date) -lt $taskDeadline)
+    do {$taskDeployed=@($taskExisting)
+$null=Assert-CleanSource -Root $taskRoot -Relative $taskDeployed
+try{return Invoke-RestMethod http://127.0.0.1:8080/api/state -TimeoutSec 3}catch{Start-Sleep -Milliseconds 300}} while((Get-Date) -lt $taskDeadline)
     throw 'Backend did not restart.'
 }
 try{
@@ -64,11 +63,11 @@ try{
         $taskPreview=Invoke-RestMethod http://127.0.0.1:8080/api/preview -Method Post -ContentType 'application/json; charset=utf-8' -Body $taskBody -TimeoutSec 30
         if($taskPreview.page_count -ne 1 -or $taskPreview.pages[0].metadata.lines.Count -ne 20 -or $taskPreview.pages[0].metadata.row_guides.Count -ne 20){throw ('Chinese row check failed: '+$taskMode)}
     }
-    [pscustomobject]@{Result='UPDATED';ControllerPid=$taskControllerPid;JobId=$taskAfter.job_id;Phase=$taskAfter.phase;AcknowledgedBefore=$taskBefore.acknowledged;AcknowledgedAfter=$taskAfter.acknowledged;Backup=$taskBackup}|ConvertTo-Json
+    [pscustomobject]@{Result='UPDATED';ControllerPid=$taskControllerPid;JobId=$taskAfter.job_id;Phase=$taskAfter.phase;AcknowledgedBefore=$taskBefore.acknowledged;AcknowledgedAfter=$taskAfter.acknowledged}|ConvertTo-Json
 }catch{
     $taskFailure=$_
     Stop-Backend
-    tar -xf (Join-Path $taskBackup 'files-before.tar') -C $taskRelease
+    Restore-CommittedFiles -Root $taskRoot -Relative $taskDeployed
     Start-ScheduledTask -TaskName 'Xieziji-Web'
     Wait-Backend|Out-Null
     Write-Output 'BACKEND_ROLLED_BACK; controller was not stopped'

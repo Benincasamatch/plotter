@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿. (Join-Path $PSScriptRoot 'deploy-git-rollback.ps1')
 $ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $taskRoot='C:\Users\102\plotter-web-20261014'
@@ -8,13 +8,10 @@ $taskRelease=(Resolve-Path -LiteralPath $taskWeb.Actions[0].WorkingDirectory).Pa
 $taskNewRelease=Join-Path $taskRoot 'releases\89df8a2-20261020-limit12000'
 $taskPackage=Join-Path $taskRoot 'deploy\limit12000-20261020.tar'
 $taskFlag=Join-Path $taskRoot 'backend-jobs\.speed-limit-update-pending'
-$taskBackup=Join-Path $taskRoot ('deploy\backups\before-limit12000-web-'+(Get-Date -Format yyyyMMddHHmmss))
 if(-not $taskRelease.StartsWith($taskRoot+'\releases\',[StringComparison]::OrdinalIgnoreCase)){throw 'Unexpected release directory.'}
 if((Get-FileHash -LiteralPath $taskPackage -Algorithm SHA256).Hash -ne 'BD0E5B0862B6F1A3867B4684398A104F0A5D321F420B7FC3815969011B2FEE95'){throw 'Package hash mismatch.'}
 if(Test-Path -LiteralPath $taskNewRelease){throw 'New controller release already exists; inspect before retrying.'}
-New-Item -ItemType Directory -Path $taskBackup | Out-Null
 $taskFiles=@('backend/layout.py','backend/document.py','backend/server.py','frontend/app.js','frontend/index.html')
-tar -cf (Join-Path $taskBackup 'web-before.tar') -C $taskRelease @taskFiles
 if($LASTEXITCODE -ne 0){throw 'Backup failed.'}
 $taskBefore=Invoke-RestMethod http://127.0.0.1:8080/api/state -TimeoutSec 10
 $taskControllerPid=(Get-NetTCPConnection -LocalPort 8090 -State Listen | Select-Object -First 1).OwningProcess
@@ -23,7 +20,9 @@ $taskWebProcess=Get-CimInstance Win32_Process -Filter "ProcessId=$taskWebPid"
 if($taskWebProcess.CommandLine -notmatch 'backend\.server'){throw 'Unexpected backend process.'}
 function Wait-Backend {
     $taskDeadline=(Get-Date).AddSeconds(30)
-    do {try{return Invoke-RestMethod http://127.0.0.1:8080/api/state -TimeoutSec 3}catch{Start-Sleep -Milliseconds 400}}while((Get-Date) -lt $taskDeadline)
+    do {$taskDeployed=@($taskFiles)
+$null=Assert-CleanSource -Root $taskRoot -Relative $taskDeployed
+try{return Invoke-RestMethod http://127.0.0.1:8080/api/state -TimeoutSec 3}catch{Start-Sleep -Milliseconds 400}}while((Get-Date) -lt $taskDeadline)
     throw 'Backend did not start.'
 }
 try {
@@ -57,8 +56,7 @@ try {
     $taskSettings=New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 12) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskName 'Xieziji-Limit12000-Apply' -Action $taskAction -Principal $taskController.Principal -Trigger $taskTrigger -Settings $taskSettings -Description 'One-time controller update after the current operation finishes; never interrupt active motion.' -Force | Out-Null
     Start-ScheduledTask -TaskName 'Xieziji-Limit12000-Apply'
-    $taskAfter | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $taskBackup 'state-after.json') -Encoding UTF8
-    [pscustomobject]@{Result='QUEUED_AFTER_IDLE';WebLimit=12000;ControllerPidUnchanged=$taskControllerPid;Phase=$taskAfter.phase;JobId=$taskAfter.job_id;AcknowledgedBefore=$taskBefore.acknowledged;AcknowledgedAfter=$taskAfter.acknowledged;Backup=$taskBackup} | ConvertTo-Json
+    [pscustomobject]@{Result='QUEUED_AFTER_IDLE';WebLimit=12000;ControllerPidUnchanged=$taskControllerPid;Phase=$taskAfter.phase;JobId=$taskAfter.job_id;AcknowledgedBefore=$taskBefore.acknowledged;AcknowledgedAfter=$taskAfter.acknowledged} | ConvertTo-Json
 } catch {
     $taskFailure=$_
     Stop-ScheduledTask -TaskName 'Xieziji-Limit12000-Apply' -ErrorAction SilentlyContinue
@@ -66,7 +64,7 @@ try {
     Remove-Item -LiteralPath $taskFlag -ErrorAction SilentlyContinue
     Stop-ScheduledTask -TaskName 'Xieziji-Web'
     Get-CimInstance Win32_Process | Where-Object {$_.CommandLine -match 'backend\.server' -and $_.ExecutablePath -eq $taskWebProcess.ExecutablePath} | ForEach-Object {Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue}
-    tar -xf (Join-Path $taskBackup 'web-before.tar') -C $taskRelease
+    Restore-CommittedFiles -Root $taskRoot -Relative $taskDeployed
     Start-ScheduledTask -TaskName 'Xieziji-Web'
     Wait-Backend | Out-Null
     throw $taskFailure

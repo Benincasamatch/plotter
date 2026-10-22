@@ -1,11 +1,10 @@
 ﻿param([string]$DeployRoot = 'C:\Users\102\plotter-web-20261014')
-$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'deploy-git-rollback.ps1')
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $taskRoot = (Resolve-Path -LiteralPath $DeployRoot).Path
 $taskPackage = Join-Path $taskRoot 'deploy\manual-console-update-20261016.tar'
 $taskPython = Join-Path $taskRoot '.venv\Scripts\python.exe'
-$taskBackup = Join-Path $taskRoot ('deploy\before-manual-console-' + (Get-Date -Format yyyyMMddHHmmss) + '.tar')
 $taskState = Invoke-RestMethod 'http://127.0.0.1:8080/api/state'
 if ($taskState.phase -notin @('idle','complete','disconnected') -or ($taskState.connected -and $taskState.status -notlike '<Idle*')) {
     throw 'Device is busy; service was not changed.'
@@ -29,8 +28,8 @@ function Restore-PlotterConnection {
     }
 }
 
-& tar.exe -cf $taskBackup -C $taskRoot plotter/server.py plotter/machine.py plotter/static/index.html plotter/static/app.js plotter/static/style.css
-if ($LASTEXITCODE -ne 0) { throw 'Backup failed; service was not changed.' }
+$taskDeployed=@('plotter/server.py','plotter/machine.py','plotter/static/index.html','plotter/static/app.js','plotter/static/style.css')
+$null=Assert-CleanSource -Root $taskRoot -Relative $taskDeployed
 try {
     if ($taskRestorePort) {
         Invoke-RestMethod 'http://127.0.0.1:8080/api/disconnect' -Method Post -ContentType 'application/json' -Body '{}' | Out-Null
@@ -63,13 +62,13 @@ try {
         Position=$taskState.position
         Pen=$taskState.pen
         InvalidJogRejected=$taskInvalidRejected
-        Backup=$taskBackup
+        Files=$taskDeployed
     } | ConvertTo-Json -Depth 4
 } catch {
     $taskFailure = $_
     if ($taskServiceStopped) {
         Stop-PlotterService
-        & tar.exe -xf $taskBackup -C $taskRoot
+        Restore-CommittedFiles -Root $taskRoot -Relative $taskDeployed
         Start-ScheduledTask -TaskName 'Xieziji-Web'
         Start-Sleep -Seconds 3
     }

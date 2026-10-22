@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference='Stop'
+﻿. (Join-Path $PSScriptRoot 'deploy-git-rollback.ps1')
 $ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $taskRoot='C:\Users\102\plotter-web-20261014'
@@ -38,11 +38,8 @@ $taskControllerPid=Listener-Pid 8090
 $taskWebPid=Listener-Pid 8080
 $taskConfig=[IO.File]::ReadAllText((Join-Path $taskRelease 'deploy\services.json')) | ConvertFrom-Json
 if((Get-Process -Id $taskWebPid).Path -ne $taskConfig.Python){throw 'Unexpected backend executable'}
-$taskBackup=Join-Path $taskRoot ('deploy\backups\before-cjk-latin-size-'+(Get-Date -Format yyyyMMddHHmmss))
-New-Item -ItemType Directory -Path $taskBackup | Out-Null
-$taskOldFiles=@($taskManifest.expected.PSObject.Properties.Name)
-tar -cf (Join-Path $taskBackup 'before.tar') -C $taskRelease @taskOldFiles
-if($LASTEXITCODE -ne 0){throw 'Backup failed'}
+$taskDeployed=@($taskManifest.files.PSObject.Properties.Name)
+$null=Assert-CleanSource -Root $taskRoot -Relative $taskDeployed
 try{
  # Only the gateway restarts. The C++ worker and device connection are untouched.
  Stop-ScheduledTask -TaskName 'Xieziji-Web'
@@ -83,13 +80,12 @@ try{
  if((Listener-Pid 8090) -ne $taskControllerPid){throw 'Controller PID changed'}
  if($taskAfter.job_id -ne $taskBefore.job_id -or $taskAfter.acknowledged -lt $taskBefore.acknowledged){throw 'Task continuity check failed'}
  if($taskAfter.error -and $taskAfter.error -ne $taskBefore.error){throw 'New controller error'}
- [pscustomobject]@{Result='UPDATED';ControllerPid=$taskControllerPid;BackendPid=(Listener-Pid 8080);Phase=$taskAfter.phase;JobId=$taskAfter.job_id;ChineseHeight=$taskSmall.metadata.size;EnglishHeight=$taskLarge.metadata.latin_size;Backup=$taskBackup;Files=$taskManifest.files} | ConvertTo-Json -Depth 4 | Tee-Object -FilePath (Join-Path $taskBackup 'result.json')
+ [pscustomobject]@{Result='UPDATED';ControllerPid=$taskControllerPid;BackendPid=(Listener-Pid 8080);Phase=$taskAfter.phase;JobId=$taskAfter.job_id;ChineseHeight=$taskSmall.metadata.size;EnglishHeight=$taskLarge.metadata.latin_size;Files=$taskManifest.files} | ConvertTo-Json -Depth 4
 }catch{
  $taskFailure=$_
  Stop-ScheduledTask -TaskName 'Xieziji-Web' -ErrorAction SilentlyContinue
  try{$taskCurrentWeb=Listener-Pid 8080;Stop-Process -Id $taskCurrentWeb -Force -ErrorAction SilentlyContinue}catch{}
- tar -xf (Join-Path $taskBackup 'before.tar') -C $taskRelease
- if($LASTEXITCODE -ne 0){throw 'Rollback extraction failed'}
+ Restore-CommittedFiles -Root $taskRoot -Relative $taskDeployed
  Start-ScheduledTask -TaskName 'Xieziji-Web'
  Wait-Backend | Out-Null
  Write-Output 'CJK_LATIN_SIZE_UPDATE_ROLLED_BACK'

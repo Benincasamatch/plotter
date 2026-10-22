@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿. (Join-Path $PSScriptRoot 'deploy-git-rollback.ps1')
 $ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $taskRoot='C:\Users\102\plotter-web-20261014'
@@ -27,12 +27,9 @@ $taskControllerPid=Listener-Pid 8090
 $taskWebPid=Listener-Pid 8080
 $taskConfig=[IO.File]::ReadAllText((Join-Path $taskRelease 'deploy/services.json')) | ConvertFrom-Json
 if((Get-Process -Id $taskWebPid).Path -ne $taskConfig.Python){throw 'Unexpected backend executable'}
-$taskBackup=Join-Path $taskDeploy ('backups\before-workbench-'+(Get-Date -Format yyyyMMddHHmmss))
-New-Item -ItemType Directory -Path $taskBackup | Out-Null
-$taskOldFiles=@($taskManifest.expected.PSObject.Properties.Name)
-tar -cf (Join-Path $taskBackup 'before.tar') -C $taskRelease @taskOldFiles
-if($LASTEXITCODE -ne 0){throw 'Backup failed'}
-$taskStage=Join-Path $taskBackup 'stage'
+$taskDeployed=@($taskManifest.expected.PSObject.Properties.Name)
+$null=Assert-CleanSource -Root $taskRoot -Relative $taskDeployed
+$taskStage=Join-Path $taskDeploy ('workbench-stage-'+(Get-Date -Format yyyyMMddHHmmss))
 New-Item -ItemType Directory -Path $taskStage | Out-Null
 tar -xf $taskPackage -C $taskStage
 if($LASTEXITCODE -ne 0){throw 'Staging failed'}
@@ -56,13 +53,12 @@ try{
  if((Listener-Pid 8090) -ne $taskControllerPid){throw 'Controller PID changed'}
  if($taskAfter.job_id -ne $taskBefore.job_id -or $taskAfter.acknowledged -lt $taskBefore.acknowledged){throw 'Task continuity check failed'}
  if($taskAfter.error -and $taskAfter.error -ne $taskBefore.error){throw 'New controller error'}
- [pscustomobject]@{Result='UPDATED';Release=$taskRelease;Backup=$taskBackup;BackendPid=(Listener-Pid 8080);ControllerPid=$taskControllerPid;Phase=$taskAfter.phase;JobId=$taskAfter.job_id;Connected=$taskAfter.connected;Acknowledged=$taskAfter.acknowledged;Files=$taskManifest.files}|ConvertTo-Json -Depth 5 | Tee-Object -FilePath (Join-Path $taskBackup 'result.json')
+ [pscustomobject]@{Result='UPDATED';Release=$taskRelease;BackendPid=(Listener-Pid 8080);ControllerPid=$taskControllerPid;Phase=$taskAfter.phase;JobId=$taskAfter.job_id;Connected=$taskAfter.connected;Acknowledged=$taskAfter.acknowledged;Files=$taskManifest.files}|ConvertTo-Json -Depth 5 | Out-String | Write-Output
 }catch{
  $taskFailure=$_
  Stop-ScheduledTask -TaskName 'Xieziji-Web' -ErrorAction SilentlyContinue
  try{$taskCurrentWeb=Listener-Pid 8080;Stop-Process -Id $taskCurrentWeb -Force -ErrorAction SilentlyContinue}catch{}
- tar -xf (Join-Path $taskBackup 'before.tar') -C $taskRelease
- if($LASTEXITCODE -ne 0){throw 'Rollback extraction failed'}
+ Restore-CommittedFiles -Root $taskRoot -Relative $taskDeployed
  $taskTheme=Join-Path $taskRelease 'frontend/workbench.css'
  if(Test-Path -LiteralPath $taskTheme){Remove-Item -LiteralPath $taskTheme}
  Start-ScheduledTask -TaskName 'Xieziji-Web'

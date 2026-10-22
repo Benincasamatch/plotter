@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿. (Join-Path $PSScriptRoot 'deploy-git-rollback.ps1')
 $ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $taskRoot='C:\Users\102\plotter-web-20261014'
@@ -11,11 +11,8 @@ if((Get-FileHash -LiteralPath $taskPackage).Hash -ne $taskManifest.package_sha25
 foreach($taskEntry in $taskManifest.expected.PSObject.Properties){
  if((Get-FileHash -LiteralPath (Join-Path $taskRelease $taskEntry.Name)).Hash -ne $taskEntry.Value){throw ('Live source changed: '+$taskEntry.Name)}
 }
-$taskBackup=Join-Path $taskRoot ('deploy\backups\before-page-notifications-'+(Get-Date -Format yyyyMMddHHmmss))
-New-Item -ItemType Directory -Path $taskBackup | Out-Null
-$taskOldFiles=@($taskManifest.expected.PSObject.Properties.Name)
-tar -cf (Join-Path $taskBackup 'before.tar') -C $taskRelease @taskOldFiles
-if($LASTEXITCODE -ne 0){throw 'Backup failed'}
+$taskDeployed=@($taskManifest.expected.PSObject.Properties.Name)
+$null=Assert-CleanSource -Root $taskRoot -Relative $taskDeployed
 function Listener-Pid([int]$taskPort){
  $taskRows=@(netstat -ano -p tcp | Where-Object {$_ -match (':'+$taskPort+'\s+\S+\s+LISTENING\s+\d+\s*$')})
  if($taskRows.Count -ne 1){throw ('Unexpected listener count on '+$taskPort)}
@@ -53,12 +50,12 @@ try{
  if((Listener-Pid 8090) -ne $taskControllerPid){throw 'Controller PID changed'}
  if($taskAfter.job_id -ne $taskBefore.job_id -or $taskAfter.acknowledged -lt $taskBefore.acknowledged){throw 'Task continuity check failed'}
  if($taskAfter.error -and $taskAfter.error -ne $taskBefore.error){throw 'New controller error'}
- [pscustomobject]@{Result='UPDATED';ControllerPid=$taskControllerPid;BackendPid=(Listener-Pid 8080);Phase=$taskAfter.phase;JobId=$taskAfter.job_id;Backup=$taskBackup} | ConvertTo-Json | Tee-Object -FilePath (Join-Path $taskBackup 'result.json')
+ [pscustomobject]@{Result='UPDATED';ControllerPid=$taskControllerPid;BackendPid=(Listener-Pid 8080);Phase=$taskAfter.phase;JobId=$taskAfter.job_id} | ConvertTo-Json | Out-String | Write-Output
 }catch{
  $taskFailure=$_
  Stop-ScheduledTask -TaskName 'Xieziji-Web' -ErrorAction SilentlyContinue
  try{$taskCurrentWeb=Listener-Pid 8080;Stop-Process -Id $taskCurrentWeb -Force -ErrorAction SilentlyContinue}catch{}
- tar -xf (Join-Path $taskBackup 'before.tar') -C $taskRelease
+ Restore-CommittedFiles -Root $taskRoot -Relative $taskDeployed
  Start-ScheduledTask -TaskName 'Xieziji-Web'
  Wait-Backend | Out-Null
  Write-Output 'NOTIFICATION_UPDATE_ROLLED_BACK; controller unchanged'

@@ -1,11 +1,10 @@
 ﻿param([string]$DeployRoot = 'C:\Users\102\plotter-web-20261014')
-$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'deploy-git-rollback.ps1')
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $taskRoot = (Resolve-Path -LiteralPath $DeployRoot).Path
 $taskPackage = Join-Path $taskRoot 'deploy\font-mix-update-20261016.tar'
 $taskPython = Join-Path $taskRoot '.venv\Scripts\python.exe'
-$taskBackup = Join-Path $taskRoot ('deploy\before-font-mix-' + (Get-Date -Format yyyyMMddHHmmss) + '.tar')
 $taskState = Invoke-RestMethod 'http://127.0.0.1:8080/api/state'
 if ($taskState.connected -or $taskState.phase -in @('running','paused','draining')) {
     throw 'Device is connected or busy; service was not changed.'
@@ -20,9 +19,9 @@ function Stop-PlotterService {
     } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
-& tar.exe -cf $taskBackup -C $taskRoot plotter/server.py plotter/layout.py plotter/static/index.html plotter/static/app.js plotter/static/style.css
-if ($LASTEXITCODE -ne 0) { throw 'Backup failed; service was not changed.' }
 Stop-PlotterService
+$taskDeployed=@('plotter/server.py','plotter/layout.py','plotter/static/index.html','plotter/static/app.js','plotter/static/style.css')
+$null=Assert-CleanSource -Root $taskRoot -Relative $taskDeployed
 try {
     & tar.exe -xf $taskPackage -C $taskRoot
     if ($LASTEXITCODE -ne 0) { throw 'Update extraction failed' }
@@ -49,12 +48,12 @@ try {
         FontMix=$taskPreview.metadata.font_mix
         Commands=$taskPreview.metadata.commands
         Connected=$taskState.connected
-        Backup=$taskBackup
+        Files=$taskDeployed
     } | ConvertTo-Json -Depth 5
 } catch {
     $taskFailure = $_
     Stop-PlotterService
-    & tar.exe -xf $taskBackup -C $taskRoot
+    Restore-CommittedFiles -Root $taskRoot -Relative $taskDeployed
     Start-ScheduledTask -TaskName 'Xieziji-Web'
     throw $taskFailure
 }

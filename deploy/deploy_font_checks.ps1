@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿. (Join-Path $PSScriptRoot 'deploy-git-rollback.ps1')
 $ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $taskRoot='C:\Users\102\plotter-web-20261014'
@@ -40,11 +40,8 @@ $taskBefore=Invoke-RestMethod http://127.0.0.1:8080/api/state -TimeoutSec 5
 $taskControllerPid=Listener-Pid 8090
 $taskWebPid=Listener-Pid 8080
 if((Get-Process -Id $taskWebPid).Path -ne $taskConfig.Python){throw 'Unexpected backend executable'}
-$taskBackup=Join-Path $taskRoot ('deploy\backups\before-font-checks-'+(Get-Date -Format yyyyMMddHHmmss))
-New-Item -ItemType Directory -Path $taskBackup | Out-Null
-$taskOldFiles=@($taskManifest.expected.PSObject.Properties | Where-Object {$_.Value} | ForEach-Object {$_.Name})
-tar -cf (Join-Path $taskBackup 'before.tar') -C $taskRelease @taskOldFiles
-if($LASTEXITCODE -ne 0){throw 'Backup failed'}
+$taskDeployed=@($taskManifest.expected.PSObject.Properties | Where-Object {$_.Value} | ForEach-Object {$_.Name})
+$null=Assert-CleanSource -Root $taskRoot -Relative $taskDeployed
 try{
  Stop-ScheduledTask -TaskName Xieziji-Web
  Stop-Process -Id $taskWebPid -Force -ErrorAction SilentlyContinue
@@ -61,12 +58,12 @@ try{
  if((Listener-Pid 8090) -ne $taskControllerPid){throw 'Controller PID changed'}
  if($taskAfter.job_id -ne $taskBefore.job_id -or $taskAfter.acknowledged -lt $taskBefore.acknowledged){throw 'Task continuity check failed'}
  if($taskAfter.error -and $taskAfter.error -ne $taskBefore.error){throw 'New controller error'}
- [pscustomobject]@{Result='UPDATED';ControllerPid=$taskControllerPid;BackendPid=(Listener-Pid 8080);Phase=$taskAfter.phase;JobId=$taskAfter.job_id;FontCheck=$taskStatus;Backup=$taskBackup} | ConvertTo-Json -Depth 5 | Tee-Object -FilePath (Join-Path $taskBackup 'result.json')
+ [pscustomobject]@{Result='UPDATED';ControllerPid=$taskControllerPid;BackendPid=(Listener-Pid 8080);Phase=$taskAfter.phase;JobId=$taskAfter.job_id;FontCheck=$taskStatus} | ConvertTo-Json -Depth 5 | Out-String | Write-Output
 }catch{
  $taskFailure=$_
  Stop-ScheduledTask -TaskName Xieziji-Web -ErrorAction SilentlyContinue
  try{$taskCurrentWeb=Listener-Pid 8080;Stop-Process -Id $taskCurrentWeb -Force -ErrorAction SilentlyContinue}catch{}
- tar -xf (Join-Path $taskBackup 'before.tar') -C $taskRelease
+ Restore-CommittedFiles -Root $taskRoot -Relative $taskDeployed
  foreach($taskEntry in $taskManifest.expected.PSObject.Properties | Where-Object {-not $_.Value}){
   $taskRemove=[IO.Path]::GetFullPath((Join-Path $taskRelease $taskEntry.Name))
   if(-not $taskRemove.StartsWith($taskRelease+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Unsafe rollback file path'}

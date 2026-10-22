@@ -30,10 +30,8 @@ plotter/.testdata/
 releases/*/controller/bin/
 releases/*/controller/build/
 releases/*/controller/.testdata/*/
-deploy/backups/
 deploy/services/
 deploy/*-stage-*/
-deploy/cjk-rows-stage-*/
 deploy/*.bak
 deploy/*.before-*
 
@@ -48,3 +46,6 @@ plotter/preview-*.png
 
 # 本机字体目录（符号链接，不随仓库分发）
 gcodeFonts/
+
+# 历史快照由 Git 管理，不忽略
+!deploy/history/

@@ -1,0 +1,4 @@
+# Archived snapshots are byte-exact copies of what was deployed.
+# Any end-of-line conversion would silently change their content and break the
+# SHA-256 recorded in each MANIFEST.json, so keep them verbatim.
+deploy/history/** -text

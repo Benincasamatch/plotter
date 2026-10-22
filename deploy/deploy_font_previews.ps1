@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿. (Join-Path $PSScriptRoot 'deploy-git-rollback.ps1')
 $ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $taskRoot='C:\Users\102\plotter-web-20261014'
@@ -36,11 +36,8 @@ $taskControllerPid=Listener-Pid 8090
 $taskWebPid=Listener-Pid 8080
 $taskConfig=Get-Content -LiteralPath (Join-Path $taskRelease 'deploy\services.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 if((Get-Process -Id $taskWebPid).Path -ne $taskConfig.Python){throw 'Unexpected backend executable.'}
-$taskBackup=Join-Path $taskRoot ('deploy\backups\before-font-previews-'+(Get-Date -Format yyyyMMddHHmmss))
-New-Item -ItemType Directory -Path $taskBackup | Out-Null
-tar -cf (Join-Path $taskBackup 'before.tar') -C $taskRelease @taskOldFiles
-if($LASTEXITCODE -ne 0){throw 'Backup failed.'}
-$taskBefore | ConvertTo-Json -Depth 9 | Set-Content -LiteralPath (Join-Path $taskBackup 'state-before.json') -Encoding UTF8
+$taskDeployed=@($taskManifest.files.PSObject.Properties.Name)
+$null=Assert-CleanSource -Root $taskRoot -Relative $taskDeployed
 try{
     # The controller process and its device connection are never stopped.
     schtasks.exe /End /TN Xieziji-Web | Out-Null
@@ -58,13 +55,13 @@ try{
     if($taskAfter.job_id -ne $taskBefore.job_id -or $taskAfter.acknowledged -lt $taskBefore.acknowledged -or $taskAfter.error){throw 'Controller continuity check failed.'}
     $taskCatalog=Invoke-RestMethod http://127.0.0.1:8080/api/font-recommendations -TimeoutSec 15
     if(@($taskCatalog.recommendations).Count -ne $taskManifest.recommendations -or $taskCatalog.summary.analyzed_fonts -ne $taskManifest.font_count -or $taskCatalog.summary.font_count -ne $taskManifest.font_count){throw 'Font catalog validation failed.'}
-    $taskResult=[pscustomobject]@{Result='UPDATED';Release=$taskRelease;ControllerPid=$taskControllerPid;JobId=$taskAfter.job_id;Phase=$taskAfter.phase;Limit=$taskAfter.speed_limit;FontCount=$taskCatalog.summary.analyzed_fonts;Recommendations=@($taskCatalog.recommendations).Count;Backup=$taskBackup}
-    $taskResult | ConvertTo-Json | Tee-Object -FilePath (Join-Path $taskBackup 'result.json')
+    $taskResult=[pscustomobject]@{Result='UPDATED';Release=$taskRelease;ControllerPid=$taskControllerPid;JobId=$taskAfter.job_id;Phase=$taskAfter.phase;Limit=$taskAfter.speed_limit;FontCount=$taskCatalog.summary.analyzed_fonts;Recommendations=@($taskCatalog.recommendations).Count}
+    $taskResult | ConvertTo-Json | Out-String | Write-Output
 }catch{
     $taskFailure=$_
     schtasks.exe /End /TN Xieziji-Web | Out-Null
     try{$taskCurrentWeb=Listener-Pid 8080;Stop-Process -Id $taskCurrentWeb -Force -ErrorAction SilentlyContinue}catch{}
-    tar -xf (Join-Path $taskBackup 'before.tar') -C $taskRelease
+    Restore-CommittedFiles -Root $taskRoot -Relative $taskDeployed
     foreach($taskFile in $taskAddedFiles){
         $taskRemove=[IO.Path]::GetFullPath((Join-Path $taskRelease $taskFile))
         if(-not $taskRemove.StartsWith($taskRelease+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Unsafe rollback file path.'}

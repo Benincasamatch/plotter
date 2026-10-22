@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿. (Join-Path $PSScriptRoot 'deploy-git-rollback.ps1')
 $ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $taskRoot='C:\Users\102\plotter-web-20261014'
@@ -20,18 +20,22 @@ foreach($taskEntry in $taskManifest.expected.PSObject.Properties){
 }
 $taskStamp=Get-Date -Format yyyyMMddHHmmss
 $taskStage=Join-Path $taskDeploy ('device-profiles-stage-'+$taskStamp)
-$taskBackup=Join-Path $taskDeploy ('backups\before-device-profiles-'+$taskStamp)
-New-Item -ItemType Directory -Path $taskStage,$taskBackup | Out-Null
+New-Item -ItemType Directory -Path $taskStage | Out-Null
 tar -xf $taskPackage -C $taskStage
 if($LASTEXITCODE -ne 0){throw 'Package extraction failed'}
 foreach($taskEntry in $taskManifest.files.PSObject.Properties){
  if((Get-FileHash -LiteralPath (Join-Path $taskStage $taskEntry.Name)).Hash -ne $taskEntry.Value){throw ('Staged file mismatch: '+$taskEntry.Name)}
 }
 if((Get-FileHash -LiteralPath (Join-Path $taskStage 'controller-update.exe')).Hash -ne $taskManifest.controller_after){throw 'Staged binary mismatch'}
-$taskOldFiles=@($taskManifest.expected.PSObject.Properties.Name)
-tar -cf (Join-Path $taskBackup 'web-before.tar') -C $taskRelease @taskOldFiles
-if($LASTEXITCODE -ne 0){throw 'Backup failed'}
+$taskDeployed=@($taskManifest.files.PSObject.Properties.Name)
+$null=Assert-CleanSource -Root $taskRoot -Relative $taskDeployed
+# Source files roll back through git. The controller binary is a build product
+# with no tracked sources in this release, so keep exactly that one file aside.
+$taskBinaryBefore=$taskManifest.controller_before
+$taskBackup=Join-Path $taskDeploy ('backups\before-device-profiles-'+$taskStamp)
+New-Item -ItemType Directory -Path $taskBackup | Out-Null
 Copy-Item -LiteralPath $taskBinary -Destination (Join-Path $taskBackup 'controller-before.exe')
+if((Get-FileHash -LiteralPath (Join-Path $taskBackup 'controller-before.exe')).Hash -ne $taskBinaryBefore){throw 'Controller backup mismatch'}
 function Listener-Pid([int]$taskPort){
  $taskRows=@(netstat -ano -p tcp | Where-Object {$_ -match (':'+$taskPort+'\s+\S+\s+LISTENING\s+\d+\s*$')})
  if($taskRows.Count -ne 1){throw ('Unexpected listener count on '+$taskPort)}
@@ -88,7 +92,7 @@ try{
  $taskHtml=(Invoke-WebRequest http://127.0.0.1:8080/ -UseBasicParsing -TimeoutSec 5).Content
  if($taskHtml -notmatch 'id="deviceName"' -or $taskHtml -notmatch 'id="penUpZ"' -or $taskHtml -notmatch 'id="controllerType"'){throw 'Updated device controls missing'}
  if((Get-FileHash -LiteralPath $taskBinary).Hash -ne $taskManifest.controller_after){throw 'Installed binary mismatch'}
- [pscustomobject]@{Result='UPDATED';Phase=$taskAfter.phase;Connected=$taskAfter.connected;Backup=$taskBackup;PreviousPort=$taskBefore.port;ControllerPid=(Listener-Pid 8090);BackendPid=(Listener-Pid 8080)} | ConvertTo-Json | Tee-Object -FilePath (Join-Path $taskBackup 'result.json')
+ [pscustomobject]@{Result='UPDATED';Phase=$taskAfter.phase;Connected=$taskAfter.connected;PreviousPort=$taskBefore.port;ControllerPid=(Listener-Pid 8090);BackendPid=(Listener-Pid 8080)} | ConvertTo-Json | Out-String | Write-Output
 }catch{
  $taskFailure=$_
  Stop-ScheduledTask -TaskName 'Xieziji-Web' -ErrorAction SilentlyContinue
@@ -98,8 +102,9 @@ try{
   try{$taskCurrentController=Listener-Pid 8090;Stop-Process -Id $taskCurrentController -Force -ErrorAction SilentlyContinue}catch{}
  }
  if($taskFilesChanged){
-  tar -xf (Join-Path $taskBackup 'web-before.tar') -C $taskRelease
+  Restore-CommittedFiles -Root $taskRoot -Relative $taskDeployed
   Copy-Item -LiteralPath (Join-Path $taskBackup 'controller-before.exe') -Destination $taskBinary -Force
+  if((Get-FileHash -LiteralPath $taskBinary).Hash -ne $taskBinaryBefore){throw 'Rolled-back controller binary mismatch'}
  }
  if($taskControllerStopped){Start-ScheduledTask -TaskName 'Xieziji-Controller'}
  Remove-Item -LiteralPath $taskFlag -Force -ErrorAction SilentlyContinue
