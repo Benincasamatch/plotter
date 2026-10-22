@@ -4,7 +4,8 @@
 - 发布目录：`releases/89df8a2-20261020-live-speed`
 - 改动：`backend/mixing.py`、`backend/document.py`、`frontend/{index.html,app.js,style.css,font-library.js}`、`README.md`
 - 旧版单服务同步：`plotter/mixing.py`、`plotter/static/{index.html,app.js,style.css}`、`plotter/test_service.py`
-- 回滚：`deploy-git-rollback.ps1`（HEAD 即部署前状态）
+- 回滚：部署前状态为 `ca74792`；`deploy-git-rollback.ps1` 恢复 Git HEAD，若已提交本功能，
+  需要先 `git checkout ca74792 -- releases/89df8a2-20261020-live-speed` 再重启 `Xieziji-Web`
 
 ## 行为
 
