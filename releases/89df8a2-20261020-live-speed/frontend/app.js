@@ -233,6 +233,9 @@ function displayPaper(svg, metadata, preservePaths=false){
     const writing=previous.querySelector('#writing-paths');if(writing)next.querySelector('#writing-paths').replaceWith(writing.cloneNode(true));
   }
   $('paperView').replaceChildren(next);
+  $('paperView').classList.add('has-preview');
+  $('zoomPreview').disabled=false;
+  if($('previewZoom').open)zoomMount(true);
   $('paperView').style.aspectRatio=metadata.preview_size[0]+'/'+metadata.preview_size[1];
   $('paperLabel').textContent=`范围 / ${metadata.paper[0]} × ${metadata.paper[1]} mm`;
   renderCoordinateInfo(metadata);
@@ -248,6 +251,126 @@ async function refreshCoordinatePreview(){
     displayPaper(guide.svg,guide.metadata);
   }catch(error){if(requestRevision===axisRevision&&captured===revision)notice(error.message,true);}
 }
+// The zoom viewer reuses the SVG already on screen: no request, no new job, and
+// the strokes shown are exactly the preview that download and writing use.
+const zoomBox={scale:1,x:0,y:0,base:[0,0],drag:null,pointers:new Map(),pinch:null};
+function zoomParts(){return {stage:$('zoomStage'),canvas:$('zoomCanvas')};}
+function zoomSvg(){return $('paperView').querySelector('svg');}
+function zoomRender(){
+  const {canvas}=zoomParts();
+  canvas.style.width=zoomBox.base[0]+'px';canvas.style.height=zoomBox.base[1]+'px';
+  canvas.style.transform=`translate(${zoomBox.x}px, ${zoomBox.y}px) scale(${zoomBox.scale})`;
+  $('zoomLevel').textContent=Math.round(zoomBox.scale*100)+'%';
+  $('zoomFit').disabled=zoomBox.scale<=1.001;
+}
+function zoomLayout(keepView){
+  const {stage,canvas}=zoomParts(), svg=canvas.querySelector('svg');
+  if(!svg||!stage.clientWidth||!stage.clientHeight)return;
+  const viewBox=svg.viewBox?.baseVal;
+  const ratio=viewBox&&viewBox.width&&viewBox.height?viewBox.width/viewBox.height:210/297;
+  const pad=30, room=[Math.max(60,stage.clientWidth-pad*2),Math.max(60,stage.clientHeight-pad*2)];
+  const base=room[0]/room[1]>ratio?[room[1]*ratio,room[1]]:[room[0],room[0]/ratio];
+  const previous=zoomBox.base;
+  if(keepView&&previous[0]){
+    // Keep the middle of the visible area over the same part of the page.
+    const cx=stage.clientWidth/2, cy=stage.clientHeight/2;
+    const fx=(cx-zoomBox.x)/zoomBox.scale/previous[0], fy=(cy-zoomBox.y)/zoomBox.scale/previous[1];
+    zoomBox.x=cx-fx*zoomBox.scale*base[0]; zoomBox.y=cy-fy*zoomBox.scale*base[1];
+  }else{
+    zoomBox.scale=1;
+    zoomBox.x=(stage.clientWidth-base[0])/2; zoomBox.y=(stage.clientHeight-base[1])/2;
+  }
+  zoomBox.base=base;zoomRender();
+}
+function zoomAt(clientX,clientY,factor){
+  const {stage}=zoomParts(),rect=stage.getBoundingClientRect();
+  const scale=Math.min(16,Math.max(.25,zoomBox.scale*factor)),grow=scale/zoomBox.scale;
+  if(grow===1)return;
+  const cx=clientX-rect.left, cy=clientY-rect.top;
+  zoomBox.x=cx-(cx-zoomBox.x)*grow; zoomBox.y=cy-(cy-zoomBox.y)*grow;
+  zoomBox.scale=scale;zoomRender();
+}
+function zoomMount(relayout){
+  // The dialog shows a copy of the on-screen SVG, so a redraw while it is open
+  // (coordinate or page change) updates the magnified view too.
+  const source=zoomSvg(); if(!source)return false;
+  const clone=source.cloneNode(true),canvas=zoomParts().canvas;
+  clone.removeAttribute('style');clone.removeAttribute('width');clone.removeAttribute('height');
+  canvas.replaceChildren(clone);
+  if(relayout)zoomLayout(true);
+  return true;
+}
+function previewZoomOpen(){
+  const dialog=$('previewZoom');
+  if(!zoomMount(false))return;
+  if(!dialog.open)dialog.showModal();
+  requestAnimationFrame(()=>{zoomLayout(false);$('zoomStage').focus({preventScroll:true});});
+}
+$('zoomPreview').onclick=previewZoomOpen;
+$('previewZoom').addEventListener('close',()=>{$('zoomPreview').focus({preventScroll:true});});
+$('closePreviewZoom').onclick=()=>$('previewZoom').close();
+$('zoomFit').onclick=()=>zoomLayout(false);
+$('zoomIn').onclick=()=>{const {stage}=zoomParts(),r=stage.getBoundingClientRect();zoomAt(r.left+r.width/2,r.top+r.height/2,1.35);};
+$('zoomOut').onclick=()=>{const {stage}=zoomParts(),r=stage.getBoundingClientRect();zoomAt(r.left+r.width/2,r.top+r.height/2,1/1.35);};
+$('zoomStage').addEventListener('wheel',event=>{
+  event.preventDefault();
+  zoomAt(event.clientX,event.clientY,Math.exp(-event.deltaY*0.0015));
+},{passive:false});
+$('zoomStage').addEventListener('dblclick',event=>{
+  if(zoomBox.scale>1.05)zoomLayout(false); else zoomAt(event.clientX,event.clientY,2.4);
+});
+function zoomPinchPoints(){
+  const points=[...zoomBox.pointers.values()];
+  if(points.length<2)return null;
+  const [a,b]=points;
+  return {distance:Math.hypot(a.x-b.x,a.y-b.y),cx:(a.x+b.x)/2,cy:(a.y+b.y)/2};
+}
+$('zoomStage').addEventListener('pointerdown',event=>{
+  if(event.pointerType==='mouse'&&event.button!==0)return;
+  const {stage}=zoomParts();
+  zoomBox.pointers.set(event.pointerId,{x:event.clientX,y:event.clientY});
+  // Capture can be refused for a pointer that already ended; panning still works.
+  try{stage.setPointerCapture(event.pointerId);}catch(error){}
+  if(zoomBox.pointers.size===1){
+    zoomBox.drag={id:event.pointerId,x:event.clientX,y:event.clientY,left:zoomBox.x,top:zoomBox.y};
+    stage.classList.add('is-dragging');
+  }else if(zoomBox.pointers.size===2){
+    // A second finger switches from panning to pinch zooming.
+    zoomBox.drag=null;zoomBox.pinch=zoomPinchPoints();
+  }
+});
+$('zoomStage').addEventListener('pointermove',event=>{
+  if(!zoomBox.pointers.has(event.pointerId))return;
+  zoomBox.pointers.set(event.pointerId,{x:event.clientX,y:event.clientY});
+  if(zoomBox.pointers.size>=2){
+    const next=zoomPinchPoints();
+    if(!next)return;
+    if(zoomBox.pinch&&zoomBox.pinch.distance>0)zoomAt(next.cx,next.cy,next.distance/zoomBox.pinch.distance);
+    zoomBox.pinch=next;return;
+  }
+  const drag=zoomBox.drag;if(!drag||drag.id!==event.pointerId)return;
+  zoomBox.x=drag.left+event.clientX-drag.x;zoomBox.y=drag.top+event.clientY-drag.y;zoomRender();
+});
+const endZoomDrag=event=>{
+  const {stage}=zoomParts();
+  zoomBox.pointers.delete(event.pointerId);
+  if(zoomBox.pointers.size<2)zoomBox.pinch=null;
+  // A finger left after a pinch becomes the new pan origin.
+  const [id,point]=zoomBox.pointers.entries().next().value||[];
+  zoomBox.drag=point?{id,x:point.x,y:point.y,left:zoomBox.x,top:zoomBox.y}:null;
+  if(!zoomBox.pointers.size)stage.classList.remove('is-dragging');
+};
+$('zoomStage').addEventListener('pointerup',endZoomDrag);
+$('zoomStage').addEventListener('pointercancel',endZoomDrag);
+$('zoomStage').addEventListener('keydown',event=>{
+  const step=event.shiftKey?120:40;
+  const pans={ArrowLeft:[step,0],ArrowRight:[-step,0],ArrowUp:[0,step],ArrowDown:[0,-step]};
+  if(pans[event.key]){zoomBox.x+=pans[event.key][0];zoomBox.y+=pans[event.key][1];zoomRender();event.preventDefault();}
+  else if(event.key==='+'||event.key==='='||event.key==='-'){const {stage}=zoomParts(),r=stage.getBoundingClientRect();zoomAt(r.left+r.width/2,r.top+r.height/2,event.key==='-'?1/1.35:1.35);event.preventDefault();}
+  else if(event.key==='0'){zoomLayout(false);event.preventDefault();}
+});
+window.addEventListener('resize',()=>{if($('previewZoom').open)zoomLayout(true);});
+$('paperView').addEventListener('click',()=>{if(zoomSvg())previewZoomOpen();});
 function allowOverlap(){return layoutMode==='notebook'&&$('allowOverlap').checked;}
 function notebookSizing(){return {lineSizing:$('lineSizing').value,lineLooseness:Number($('lineLooseness').value),allowOverlap:$('allowOverlap').checked};}
 function validNotebookSizing(value){return (value.lineSizing===undefined||['rows','size'].includes(value.lineSizing))&&(value.lineLooseness===undefined||(typeof value.lineLooseness==='number'&&Number.isFinite(value.lineLooseness)&&value.lineLooseness>=1&&value.lineLooseness<=4))&&(value.allowOverlap===undefined||typeof value.allowOverlap==='boolean');}

@@ -155,3 +155,22 @@
 @media(min-width:901px){.font-inspector{position:sticky;top:0}}
 @media(max-width:760px){.font-dialog-workspace .font-inspector{display:contents}.font-dialog-workspace .font-preview-panel{width:100%;order:0}.font-dialog-workspace .font-list-panel{order:1}.font-dialog-workspace .font-recommendations{width:100%;order:2}.font-preview-panel>summary{cursor:pointer}.font-preview-panel>summary::after{content:'展开';font-size:13px;color:#708a72}.font-preview-panel[open]>summary::after{content:'收起'}}
 @media(max-width:760px){.font-dialog{width:calc(100vw - 20px);max-height:calc(100dvh - 20px);border-radius:13px}.font-dialog-header{padding:17px 18px}.font-dialog-header h2{font-size:22px}.font-dialog-header .hint{font-size:13px}.font-dialog-header button{font-size:14px;padding:9px}.font-refresh-host{padding:9px 18px}.font-refresh-host .font-refresh-tools{align-items:flex-start}.font-dialog-body{padding:16px;max-height:calc(100dvh - 210px)}.font-toolbar{grid-template-columns:1fr;gap:14px;margin-bottom:16px}.font-dialog h3{font-size:16px;margin-bottom:9px}.font-dialog-workspace{display:flex;flex-direction:column;gap:16px}.font-list-panel,.font-inspector{width:100%}.font-list-panel,.font-preview-panel,.font-dialog .font-recommendations{padding:14px}.font-dialog .font-card{gap:10px;padding:9px;min-height:90px}.font-dialog .font-thumbnail{width:58px;min-width:58px;min-height:60px}.font-dialog .font-thumbnail svg{width:54px;height:54px}.font-dialog .font-card-name{font-size:14px}.font-card-metrics{gap:3px 10px;margin-top:6px}.font-dialog .font-card-add.secondary{padding:5px 8px;font-size:13px}}
+
+/* Preview zoom: the generated SVG at arbitrary scale, without regenerating paths. */
+.paper.has-preview{cursor:zoom-in}
+.preview-zoom{width:min(1180px,calc(100vw - 32px));height:min(860px,calc(100dvh - 32px));padding:0;border:1px solid #d5ddd0;border-radius:14px;background:#fffefa;color:#243e42;box-shadow:0 20px 80px #182d3340;overflow:hidden}
+.preview-zoom[open]{display:flex;flex-direction:column}
+.preview-zoom::backdrop{background:#1b303866}
+.preview-zoom-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 22px;border-bottom:1px solid #dce3d7}
+.preview-zoom-header h2{margin:0;font-size:20px}
+.preview-zoom-header .eyebrow{margin:0 0 4px}
+.preview-zoom-header .hint{margin:6px 0 0;font-size:12px}
+.preview-zoom-tools{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.preview-zoom-tools button{padding:8px 12px;font-size:14px}
+.zoom-level{min-width:64px;text-align:center;font:13px Consolas,monospace;color:#557a67}
+.preview-zoom-stage{flex:1;min-height:0;position:relative;overflow:hidden;background:#e6e9e1;background-image:radial-gradient(#c9d0c4 .7px,transparent .7px);background-size:13px 13px;touch-action:none;cursor:grab;outline:none}
+.preview-zoom-stage:focus-visible{outline:2px solid #59836c;outline-offset:-4px}
+.preview-zoom-stage.is-dragging{cursor:grabbing}
+.preview-zoom-canvas{position:absolute;top:0;left:0;transform-origin:0 0;box-shadow:0 10px 30px #34463820}
+.preview-zoom-canvas svg{display:block;width:100%;height:100%}
+@media(max-width:600px){.preview-zoom{width:calc(100vw - 16px);height:calc(100dvh - 16px)}.preview-zoom-header{flex-direction:column;padding:14px}.preview-zoom-tools{width:100%;justify-content:space-between}}
