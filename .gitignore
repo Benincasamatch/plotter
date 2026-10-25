@@ -22,3 +22,23 @@ controller/.testdata/
 gcodeFonts/*
 !gcodeFonts/demo.gfont
 !gcodeFonts/README.md
+
+# Private deployment configuration and runtime state.
+deploy/
+backups/
+*.pem
+*.key
+*.pfx
+*.p12
+services.json
+.presets.json
+.presets-*.tmp
+.device-profiles.json
+.workspaces/
+.previews/
+.executions.json
+.font-analysis/
+local-presets-backup*.json
+server-presets-import*.json
+device-profiles.json
+.documents/

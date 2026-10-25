@@ -132,7 +132,7 @@ class SplitIntegrationTests(unittest.TestCase):
         finally:
             self.app.token = ''
 
-    def test_c_real_process_preserves_preview_and_executes_once(self):
+    def test_c_real_process_preserves_preview_and_uses_distinct_execution_ids(self):
         with self.call('/api/ports') as r:
             self.assertEqual(json.load(r)['ports'][0]['device'], 'SIMULATOR')
         with self.call('/api/connect', {'port': 'SIMULATOR'}):
@@ -144,8 +144,9 @@ class SplitIntegrationTests(unittest.TestCase):
             downloaded = r.read()
         with self.call('/api/check', dict(job_id=job_id)):
             pass
-        with self.call('/api/start', dict(job_id=job_id, origin_confirmed=True)):
-            pass
+        with self.call('/api/start', dict(job_id=job_id, origin_confirmed=True)) as r:
+            execution_id = json.load(r)['job_id']
+        self.assertNotEqual(execution_id, job_id)
         with self.call('/api/state') as r:
             eta = json.load(r)['eta']
             self.assertIsNotNone(eta['remaining_seconds'])
@@ -155,7 +156,10 @@ class SplitIntegrationTests(unittest.TestCase):
             self.assertEqual(paused['phase'], 'paused')
             self.assertEqual(paused['eta']['status'], 'paused')
             self.assertIsNone(paused['eta']['estimated_finish_at'])
-        with self.call('/api/speed', dict(percent=63, job_id=job_id)) as r:
+        # Repeating a start while this preview is active is idempotent.
+        with self.call('/api/start', dict(job_id=job_id, origin_confirmed=True)) as r:
+            self.assertEqual(json.load(r)['job_id'], execution_id)
+        with self.call('/api/speed', dict(percent=63, job_id=execution_id)) as r:
             self.assertEqual(json.load(r)['feed_override_requested'], 63)
         deadline = time.monotonic() + 5
         while self.client.snapshot()['feed_override'] != 63:
@@ -163,7 +167,7 @@ class SplitIntegrationTests(unittest.TestCase):
             time.sleep(.02)
         self.assertEqual(self.client.snapshot()['phase'], 'paused')
         with self.assertRaises(urllib.error.HTTPError):
-            self.call('/api/speed', dict(percent=201, job_id=job_id))
+            self.call('/api/speed', dict(percent=201, job_id=execution_id))
         with self.assertRaises(urllib.error.HTTPError):
             self.call('/api/jog', dict(axis='X', distance=1, feed=300))
         with self.call('/api/resume', {}):
@@ -172,7 +176,7 @@ class SplitIntegrationTests(unittest.TestCase):
         self.assertEqual(state['acknowledged'], preview['metadata']['commands'])
         with self.call('/api/state') as r:
             self.assertEqual(json.load(r)['eta']['remaining_seconds'], 0)
-        folder = pathlib.Path(self.temp.name) / 'device' / job_id
+        folder = pathlib.Path(self.temp.name) / 'device' / execution_id
         self.assertEqual((folder / 'job.gcode').read_bytes(), downloaded)
         self.assertEqual(hashlib.sha256(downloaded).hexdigest(), preview['metadata']['sha256'])
         def motion():
@@ -180,8 +184,12 @@ class SplitIntegrationTests(unittest.TestCase):
             return [bytes.fromhex(v['hex']).decode('ascii') for v in records if v['direction'] == 'tx' and bytes.fromhex(v['hex']).startswith(b'G')]
         self.assertEqual(''.join(motion()).encode(), downloaded)
         before = len(motion())
-        with self.call('/api/start', dict(job_id=job_id, origin_confirmed=True)):
-            pass
+        with self.call('/api/start', dict(job_id=job_id, origin_confirmed=True)) as r:
+            second_execution = json.load(r)['job_id']
+        self.assertNotIn(second_execution, (job_id, execution_id))
+        self.wait('complete')
+        second_folder = pathlib.Path(self.temp.name) / 'device' / second_execution
+        self.assertEqual((second_folder / 'job.gcode').read_bytes(), downloaded)
         self.assertEqual(len(motion()), before)
         with self.call('/api/pen', {'position': 'down'}):
             pass
@@ -205,10 +213,11 @@ class SplitIntegrationTests(unittest.TestCase):
         for i,page in enumerate(document['pages']):
             job_id=page['job_id']
             if i == 0:
-                self.assertFalse((pathlib.Path(self.temp.name)/'device'/second_id).exists())
-            with self.call('/api/start',dict(job_id=job_id,origin_confirmed=True)): pass
+                self.assertNotIn(second_id, self.app.executions.values())
+            with self.call('/api/start',dict(job_id=job_id,origin_confirmed=True)) as r:
+                execution_id=json.load(r)['job_id']
             self.wait('complete')
-            folder=pathlib.Path(self.temp.name)/'device'/job_id
+            folder=pathlib.Path(self.temp.name)/'device'/execution_id
             expected=archive.read(f'page-{i+1:03d}.gcode')
             self.assertEqual((folder/'job.gcode').read_bytes(),expected)
             records=[json.loads(line) for line in (folder/'serial.jsonl').read_text(encoding='utf8').splitlines()]
@@ -226,7 +235,8 @@ class SplitIntegrationTests(unittest.TestCase):
             with self.call('/api/preview',dict(font_id=next(iter(self.app.fonts)),text='Hello world! '*8,seed='stop-return')) as r:
                 preview=json.load(r)
             job_id=preview['job_id']
-            with self.call('/api/start',dict(job_id=job_id,origin_confirmed=True)): pass
+            with self.call('/api/start',dict(job_id=job_id,origin_confirmed=True)) as r:
+                execution_id=json.load(r)['job_id']
             deadline=time.monotonic()+5
             while self.client.snapshot()['acknowledged']<6 and time.monotonic()<deadline: time.sleep(.005)
             if paused:
@@ -240,9 +250,7 @@ class SplitIntegrationTests(unittest.TestCase):
             self.assertEqual(state['position'],origin)
             self.assertEqual(state['task_origin'],origin)
             self.assertLess(state['acknowledged'],state['total'])
-            with self.call('/api/start',dict(job_id=job_id,origin_confirmed=True)) as r:
-                self.assertEqual(json.load(r)['phase'],'stopped')
-            folder=pathlib.Path(self.temp.name)/'device'/job_id
+            folder=pathlib.Path(self.temp.name)/'device'/execution_id
             records=[json.loads(line) for line in (folder/'serial.jsonl').read_text(encoding='utf8').splitlines()]
             sent=[bytes.fromhex(v['hex']) for v in records if v['direction']=='tx']
             hold=sent.index(b'!')
@@ -251,8 +259,52 @@ class SplitIntegrationTests(unittest.TestCase):
             xy=next(i for i in range(z+1,len(sent)) if sent[i].startswith(b'$J=G21 G90 G53 X'))
             self.assertLess(hold,reset);self.assertLess(reset,z);self.assertLess(z,xy)
             self.assertFalse(any(raw.startswith(b'G1 ') for raw in sent[hold:]))
+            with self.call('/api/start',dict(job_id=job_id,origin_confirmed=True)) as r:
+                restarted=json.load(r)
+            self.assertNotEqual(restarted['job_id'],execution_id)
+            self.assertIn(restarted['phase'],('running','draining','complete'))
+            with self.call('/api/stop',{}): pass
+            self.wait('stopped')
             with self.call('/api/check',{}): pass
         with self.call('/api/disconnect',{}): pass
+
+    def test_f_second_page_executes_after_cache_eviction_and_backend_restart(self):
+        import io
+        import zipfile
+        data=dict(font_id=next(iter(self.app.fonts)),layout_mode='grid',width=100,height=100,
+                  margin=10,rows=4,grid=dict(columns=10),seed='restart-pages',
+                  pages=[dict(text='AB'),dict(text='BA')])
+        with self.call('/api/preview',data) as r:
+            document=json.load(r)
+        second=document['pages'][1]
+        with self.call('/api/jobs/'+second['job_id']+'/gcode') as r:
+            expected=r.read()
+        for i in range(9):
+            self.app.preview(dict(data,pages=[dict(text='A')]))
+        self.assertNotIn(document['job_id'],self.app.cache)
+        with self.call('/api/connect',{'port':'SIMULATOR'}): pass
+        with self.call('/api/start',dict(job_id=document['job_id'],origin_confirmed=True)): pass
+        self.wait('complete')
+        original=self.server.app
+        restored=Application(FONT_DIR,self.app.jobs_dir,controller=self.client)
+        self.server.app=restored
+        try:
+            with self.call('/api/documents/'+document['document_id']+'/archive') as r:
+                archive=zipfile.ZipFile(io.BytesIO(r.read()))
+            self.assertEqual(archive.read('page-002.gcode'),expected)
+            with self.call('/api/check',dict(job_id=second['job_id'])): pass
+            with self.call('/api/start',dict(job_id=second['job_id'],origin_confirmed=True)) as r:
+                execution=json.load(r)['job_id']
+            self.wait('complete')
+            folder=pathlib.Path(self.temp.name)/'device'/execution
+            self.assertEqual((folder/'job.gcode').read_bytes(),expected)
+            records=[json.loads(line) for line in (folder/'serial.jsonl').read_text(encoding='utf8').splitlines()]
+            sent=b''.join(bytes.fromhex(v['hex']) for v in records if v['direction']=='tx' and bytes.fromhex(v['hex']).startswith(b'G'))
+            self.assertEqual(sent,expected)
+            self.assertEqual(hashlib.sha256(sent).hexdigest(),second['metadata']['sha256'])
+        finally:
+            self.server.app=original
+            with self.call('/api/disconnect',{}): pass
 
 
 if __name__ == '__main__':

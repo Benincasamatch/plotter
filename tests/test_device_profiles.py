@@ -18,6 +18,8 @@ class DeviceProfileTests(unittest.TestCase):
             self.assertEqual(DeviceProfiles(pathlib.Path(folder)).all(), {'COM5': first, 'COM1': second})
             self.assertFalse(second['coordinate_system']['swap_xy'])
             self.assertEqual(first['device_control']['pen_down'], -3.5)
+            self.assertEqual(second['feed'],10000)
+            self.assertEqual(second['move_feed'],10000)
 
     def test_invalid_motion_parameters_are_rejected(self):
         for value in [dict(pen_up=True), dict(pen_down=float('nan')), dict(pen_up=301),
@@ -34,7 +36,7 @@ class DeviceProfileTests(unittest.TestCase):
         data = dict(text='Hello', device_port='COM1', device_control=dict(controller_type='grbl', pen_up=-1.25, pen_down=-3.5))
         for result in [generate(font, data), *generate_document(font, {**data, 'layout_mode': 'notebook'})]:
             self.assertIn('G1 Z-1.25 F3000', result['gcode'])
-            self.assertIn('G1 Z-3.5 F3000', result['gcode'])
+            self.assertIn('G1 Z-3.5 F10000', result['gcode'])
             self.assertNotIn('G1 Z10 ', result['gcode'])
             self.assertEqual(result['metadata']['device_port'], 'COM1')
             self.assertEqual(result['metadata']['device_control']['pen_up'], -1.25)
