@@ -40,6 +40,6 @@ let browser;
  state={...state,phase:'complete',operation_type:null,acknowledged:10};await page.waitForFunction(()=>window.__notifications.length===1);
  assert.match(await page.textContent('#pageCompletion'),/最后一页/);
  await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
- assert.deepEqual(errors,[]);assert.ok(posts.every(p=>['/api/coordinate-preview','/api/font-previews','/api/device-profiles'].includes(p)),posts.join(','));
+ assert.deepEqual(errors,[]);assert.ok(posts.every(p=>['/api/coordinate-preview','/api/font-previews','/api/device-profiles'].includes(p)||p.startsWith('/api/workspaces/')),posts.join(','));
  console.log('PASS: real page and service worker, permission/test controls, completion polling, two pages, reload dedup, mobile layout; no OS notifications or machine movements sent');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(async()=>{if(browser)await browser.close();python.kill();await new Promise(resolve=>python.exitCode!==null?resolve():python.once('exit',resolve));if(path.dirname(jobs)===path.resolve(root,'tests/.testdata'))fs.rmSync(jobs,{recursive:true,force:true});});

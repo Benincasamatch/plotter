@@ -161,7 +161,7 @@ class DocumentTests(unittest.TestCase):
                 self.assertAlmostEqual(a,b,delta=.0011)  # G-code rounds absolute coordinates to 0.001 mm.
 
     def test_invalid_formula_and_geometry_are_rejected(self):
-        for source in (r'$\unknown{x}$', '$x', r'$\frac{1}$', r'$x^^2$', r'$\sqrt{$', '${x$', '$x}$', '$'+('{'*20)+'x'+('}'*20)+'$'):
+        for source in (r'$\unknown{x}$', '$x', r'$\frac{1}$', r'$x^^2$', r'$\sqrt{$', r'$\sqrt[3{x}$', '${x$', '$x}$', '$'+('{'*20)+'x'+('}'*20)+'$'):
             with self.subTest(source=source), self.assertRaises(ValueError):
                 self.generate(text=source)
         for extra in (dict(rows=2.5), dict(punctuation_width=float('nan')), dict(layout_mode='other'),

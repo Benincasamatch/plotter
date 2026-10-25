@@ -55,3 +55,22 @@ gcodeFonts/*
 
 # 临时测试文件
 tempfile/*
+
+# Private deployment configuration and runtime state.
+# deploy/ 与 services.json 在本仓为入库的部署脚本与发布配置，不入忽略清单。
+backups/
+*.pem
+*.key
+*.pfx
+*.p12
+.presets.json
+.presets-*.tmp
+.device-profiles.json
+.workspaces/
+.previews/
+.executions.json
+.font-analysis/
+local-presets-backup*.json
+server-presets-import*.json
+device-profiles.json
+.documents/

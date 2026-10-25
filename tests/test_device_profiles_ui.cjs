@@ -39,6 +39,6 @@ let browser;
  const response=await page.request.get('http://127.0.0.1:'+port+'/api/device-profiles'), data=await response.json();
  assert.equal(data.profiles.COM1.name,'备用设备');assert.equal(data.profiles.COM5.device_control.pen_feed,200);
  await page.locator('.machine').screenshot({path:path.resolve(root,'docs/device-profiles-preview.png')});
- assert.deepEqual(errors,[]);assert.ok(posts.every(p=>['/api/device-profiles','/api/coordinate-preview','/api/font-previews'].includes(p)),posts.join(','));
+ assert.deepEqual(errors,[]);assert.ok(posts.every(p=>['/api/device-profiles','/api/coordinate-preview','/api/font-previews','/api/line-pitch'].includes(p)||p.startsWith('/api/workspaces/')),posts.join(','));
  console.log('PASS: per-port names, Z and controller type, XY mapping, automatic save/restore, reload persistence; no motion requests');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(async()=>{if(browser)await browser.close();python.kill();await new Promise(resolve=>python.exitCode!==null?resolve():python.once('exit',resolve));if(path.dirname(jobs)===path.resolve(root,'tests/.testdata'))fs.rmSync(jobs,{recursive:true,force:true});});
