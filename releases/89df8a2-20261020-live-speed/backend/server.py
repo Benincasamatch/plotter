@@ -12,7 +12,7 @@ import threading
 import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, unquote
 from backend.layout import generate, coordinate_preview
 from backend.controller_client import ControllerClient, ControllerUnavailable
 from backend.mixing import font_choices
@@ -23,6 +23,7 @@ from backend.device_profiles import DeviceProfiles
 from backend.font_updates import FontUpdates
 from backend.preview_store import PreviewStore, valid_id
 from backend.presets import Presets
+from backend.workspaces import Workspaces
 from backend.watchdog import ControllerWatchdog
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -63,6 +64,7 @@ class Application:
         self.font_updates = FontUpdates(self.fonts_dir, self.jobs_dir / '.font-analysis', self._publish_fonts)
         self.device_profiles = DeviceProfiles(self.jobs_dir)
         self.presets = Presets(self.jobs_dir)
+        self.workspaces = Workspaces(self.jobs_dir)
         self.watchdog = ControllerWatchdog(self.machine, self.device_profiles, self.jobs_dir)
 
     def _publish_fonts(self, library):
@@ -190,6 +192,14 @@ class Application:
             return execution
 
     def api(self, path, data=None):
+        if path.startswith('/api/workspaces/'):
+            device = unquote(path[len('/api/workspaces/'):])
+            if data is None:
+                return self.workspaces.read(device)
+            render = data.get('render')
+            if render is not None and (not isinstance(render, dict) or 'pages' not in render):
+                raise ValueError('需要文档排版参数')
+            return self.workspaces.update(device, data, (lambda: self.preview(render)) if render is not None else None)
         if path in ('/api/connect','/api/jog','/api/pen','/api/check') and (self.jobs_dir / '.speed-limit-update-pending').is_file():
             raise ValueError('控制端将在当前任务结束后更新，请等待更新完成后操作')
         if path == '/api/fonts':
@@ -306,12 +316,21 @@ class Handler(BaseHTTPRequestHandler):
                 if path.startswith('/api/documents/') and path.endswith('/archive'):
                     document_id = path[len('/api/documents/'):-len('/archive')]
                     self.respond(200, self.server.app.archive(document_id), 'application/zip', 'writing-pages.zip'); return
+                if path.startswith('/api/documents/') and path.endswith('/preview'):
+                    document_id = path[len('/api/documents/'):-len('/preview')]
+                    manifest = self.server.app.previews.group(document_id)
+                    pages = [dict(job_id=job, metadata=result['metadata'], svg=result['svg'])
+                             for job in manifest['job_ids'] for _, result in [self.server.app.job(job)]]
+                    self.respond(200, dict(pages[0], document_id=document_id, page_count=len(pages), pages=pages)); return
+                if path.startswith('/api/workspaces/'):
+                    self.respond(200, self.server.app.api(path)); return
                 if path not in ('/api/fonts', '/api/font-status', '/api/font-recommendations', '/api/ports', '/api/state', '/api/device-profiles', '/api/presets'): raise KeyError(path)
                 self.respond(200, self.server.app.api(path)); return
             files = {'/': ('index.html', 'text/html'), '/app.js': ('app.js', 'text/javascript'), '/style.css': ('style.css', 'text/css'), '/workbench.css': ('workbench.css', 'text/css')}
             files['/config.js'] = ('config.js', 'text/javascript')
             files['/notebook-sizing.js'] = ('notebook-sizing.js', 'text/javascript')
             files['/preset-store.js'] = ('preset-store.js', 'text/javascript')
+            files['/workspace-sync.js'] = ('workspace-sync.js', 'text/javascript')
             files['/font-library.js'] = ('font-library.js', 'text/javascript')
             files['/page-notifications.js'] = ('page-notifications.js', 'text/javascript')
             files['/notification-worker.js'] = ('notification-worker.js', 'text/javascript')
@@ -333,6 +352,8 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             if not isinstance(data, dict): raise ValueError('需要 JSON 对象')
             path = urlsplit(self.path).path
+            if path.startswith('/api/workspaces/'):
+                self.respond(200, self.server.app.api(path, data)); return
             if path not in ('/api/presets', '/api/presets/migrate', '/api/preview', '/api/line-pitch', '/api/font-refresh', '/api/font-previews', '/api/coordinate-preview', '/api/device-profiles', '/api/connect', '/api/disconnect', '/api/check', '/api/start', '/api/pause', '/api/resume', '/api/speed', '/api/jog', '/api/pen', '/api/manual-pause', '/api/manual-stop', '/api/stop'):
                 raise KeyError(path)
             self.respond(200, self.server.app.api(path, data))
@@ -341,8 +362,14 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, RuntimeError, TimeoutError, OSError) as error: self.respond(409, dict(error=str(error)))
 
 
+class WebServer(ThreadingHTTPServer):
+    # A page loads multiple scripts/styles in parallel, alongside state polls
+    # from other browsers. Avoid the stdlib's five-connection accept backlog.
+    request_queue_size = 64
+
+
 def create_server(app, host='127.0.0.1', port=8080, extra_hosts=(), extra_ports=(), frontend_origins=(), serve_frontend=True):
-    server = ThreadingHTTPServer((host, port), Handler)
+    server = WebServer((host, port), Handler)
     server.app = app
     server.allowed_origins = set(frontend_origins)
     server.serve_frontend = serve_frontend

@@ -56,7 +56,7 @@ $('port').addEventListener('change',()=>{
   const next=$('port').value, previous=profilePort;
   if(busy||state.connected){$('port').value=previous;return;}
   action(async()=>{
-    try{if(previous)await saveDeviceProfile();applyDeviceProfile(next);notice('已切换设备档案，请核对配置并重新生成预览');}
+    try{await window.sharedWorkspace?.save();if(previous)await saveDeviceProfile();applyDeviceProfile(next);await window.sharedWorkspace?.open(next);notice('已切换设备档案与服务端保存的界面');}
     catch(error){$('port').value=previous;throw error;}
   });
 });
@@ -707,7 +707,12 @@ async function loadPorts(){
     if(state.device_control)draft.device_control=state.device_control;
     deviceProfiles[legacyPort]=(await api('/api/device-profiles',draft)).profile;
   }
-  if(!profileLoaded||profilePort!==$('port').value){applyDeviceProfile($('port').value);profileLoaded=true;}else renderDeviceNames();
+  if(!profileLoaded||profilePort!==$('port').value){
+    const switchWorkspace=window.sharedWorkspace?.ready;
+    if(switchWorkspace)await window.sharedWorkspace.save();
+    applyDeviceProfile($('port').value);profileLoaded=true;
+    if(switchWorkspace)await window.sharedWorkspace.open(profilePort);
+  }else renderDeviceNames();
 }
 async function load(){
   await serverPresets.init();
@@ -726,6 +731,7 @@ async function load(){
   state=await api('/api/state');renderState();await loadPorts();
   await refreshLinePitch();
   await refreshCoordinatePreview();
+  await window.sharedWorkspace?.open(profilePort);
 }
 async function action(task){if(busy)return;actionRevision++;busy=true;renderState();try{await task();}catch(error){notice(error.message,true);}finally{busy=false;renderState();}}
 async function realtimeAction(task){actionRevision++;try{await task();}catch(error){notice(error.message,true);}finally{renderState();}}
@@ -795,7 +801,7 @@ $('preview').onclick=()=>action(async()=>{
   const capturedRevision=revision;
   $('preview').disabled=true;
   try{
-    const result=await api('/api/preview',data);
+    const result=window.sharedWorkspace?await window.sharedWorkspace.generate(data):await api('/api/preview',data);
     if(capturedRevision!==revision){notice('生成期间内容发生了修改，请重新生成预览');return;}
     if(result.metadata.motion_revision!==undefined){state.motion_revision=result.metadata.motion_revision;observedMotionRevision=result.metadata.motion_revision;}
     documentResult=result;showOutputPage(0);
