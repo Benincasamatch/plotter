@@ -14,6 +14,9 @@ from plotter.server import Application, ROOT, create_server
 
 FONT = ROOT / 'gcodeFonts' / 'blood8-2_kvenjoy_blood8.gfont'
 
+# 第三方字体不随仓库分发；缺字体时整组旧版测试跳过。
+needs_font = unittest.skipUnless(FONT.exists(), '需要本机 gcodeFonts 真实字体')
+
 
 def test_temp():
     base = (ROOT / 'plotter' / '.testdata').resolve()
@@ -55,6 +58,7 @@ class FakeSerial:
     def close(self): pass
 
 
+@needs_font
 class LayoutTests(unittest.TestCase):
     def test_chinese_and_english_paths_fit_real_margins(self):
         font = ROOT / 'gcodeFonts' / '方正兰亭超细黑体_kvenjoy_奎享科技.gfont'
@@ -112,6 +116,7 @@ class LayoutTests(unittest.TestCase):
             font_choices(dict(font_mix=[dict(font_id='zh', weight=1, scope='klingon')]), available)
 
 
+@needs_font
 class MachineTests(unittest.TestCase):
     def setUp(self):
         self.temp = test_temp(); self.folder = pathlib.Path(self.temp.name)
@@ -151,6 +156,7 @@ class MachineTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.machine.start('second',self.folder,self.result)
 
 
+@needs_font
 class HTTPTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
