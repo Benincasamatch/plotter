@@ -6,6 +6,7 @@ import random
 import secrets
 from backend.humanization import settings, active, Variation
 from backend.wrapping import preferred_space
+from backend.glyph_fallback import GlyphFallback, Stroke, moved, fallback_metadata
 
 # A font entry applies to both scripts, Chinese only, or Latin only.
 SCOPES = ('all', 'zh', 'en')
@@ -84,7 +85,7 @@ def font_choices(data, available):
     return choices, choices[0]['path']
 
 
-def layout_mixed(choices, data, text, size, spacing, pitch, usable, loader):
+def layout_mixed(choices, data, text, size, spacing, pitch, usable, loader, fallback_library=None):
     choices = normalized(choices)
     seed = data.get('seed', secrets.token_hex(8))
     if isinstance(seed, bool) or not isinstance(seed, (str, int)) or not 1 <= len(str(seed)) <= 64:
@@ -97,9 +98,23 @@ def layout_mixed(choices, data, text, size, spacing, pitch, usable, loader):
         # Zero-weight fonts never participate, including in missing-glyph fallback.
         enabled = [i for i, choice in enumerate(choices) if choice['weight'] > 0]
         fonts = {i: stack.enter_context(loader(choices[i]['path'])) for i in enabled}
+        resolver=GlyphFallback(fallback_library,choices,stack,loader) if fallback_library else None
+        replacements={}
         required = set(c for c in text if not c.isspace())
         applicable = {c: [i for i in enabled if scoped(choices[i]['scope'], script_of(c))] for c in required}
-        candidates = {c: [i for i in applicable[c] if ord(c) in fonts[i].index] for c in required}
+        candidates = {c: [i for i in applicable[c] if ord(c) in fonts[i].index and any(len(s)>=2 for s in fonts[i].glyph(c).strokes())] for c in required}
+        extra_indices={}
+        for char in sorted(candidates):
+            options=candidates[char]
+            if not options and resolver and applicable[char]:
+                replacement=resolver.find(char,[choices[i]['font_id'] for i in applicable[char]])
+                if replacement:
+                    font,info=replacement
+                    if info['font_id'] not in extra_indices:
+                        index=len(choices);extra_indices[info['font_id']]=index
+                        choices=choices+[dict(font_id=info['font_id'],path=fallback_library.fonts[info['font_id']],weight=0.,scope='all',external_fallback=True)]
+                        fonts[index]=font
+                    options.append(extra_indices[info['font_id']]);replacements[char]=info
         missing = sorted(c for c, options in candidates.items() if not options)
         if missing:
             raise ValueError(missing_message(missing, applicable))
@@ -114,8 +129,8 @@ def layout_mixed(choices, data, text, size, spacing, pitch, usable, loader):
                 paragraphs[-1].append(dict(char=char, font=None, paths=[], advance=size * .5, bounds=None))
                 continue
             options = candidates[char]
-            index = rng.choices(options, weights=[choices[i]['weight'] for i in options], k=1)[0]
-            if len(options) < len(applicable[char]):
+            index = options[0] if char in replacements else rng.choices(options, weights=[choices[i]['weight'] for i in options], k=1)[0]
+            if char in replacements or len(options) < len(applicable[char]):
                 fallback += 1
             key = (index, char)
             if key not in cache:
@@ -126,7 +141,11 @@ def layout_mixed(choices, data, text, size, spacing, pitch, usable, loader):
                 advance = max((glyph_bounds[2] - glyph_bounds[0]) * size / font.metrics['reference_height'], size * .12) + spacing
                 cache[key] = dict(char=char, font=index, paths=paths, advance=advance,
                                   bounds=(min(xs), max(xs)) if xs else None)
-            paragraphs[-1].append(variation.glyph(cache[key], size, spacing) if variation else cache[key])
+            token=variation.glyph(cache[key], size, spacing) if variation else dict(cache[key])
+            if char in replacements:
+                info=dict(replacements[char],occurrence=sum(len(p) for p in paragraphs))
+                token=dict(token,paths=[Stroke(s,info) for s in token['paths']])
+            paragraphs[-1].append(token)
 
         def measure(tokens):
             x = 0.
@@ -178,7 +197,7 @@ def layout_mixed(choices, data, text, size, spacing, pitch, usable, loader):
                 if token['font'] is not None:
                     used[token['font']] += 1
                 drift = variation.baseline(phase, x + (token['bounds'][1]/2 if token['bounds'] else 0), usable) if variation else 0.
-                paths.extend([[(x + px, row * pitch + py + drift) for px, py in stroke] for stroke in token['paths']])
+                paths.extend([moved(stroke,((x+px,row*pitch+py+drift) for px,py in stroke)) for stroke in token['paths']])
                 if variation:
                     row_variations.append(dict(token['variation'], baseline=drift) if 'variation' in token else None)
                 x += token['advance']
@@ -191,9 +210,10 @@ def layout_mixed(choices, data, text, size, spacing, pitch, usable, loader):
         summary = [dict(font_id=c['font_id'], font=c['path'].name, weight=c['weight'], scope=c['scope'],
                         probability=c['weight'] / total_weight, probabilities=shares[c['font_id']],
                         used=used[i], actual_probability=used[i] / total_chars if total_chars else 0.,
-                        metrics=fonts[i].metrics if i in fonts else None)
+                        metrics=fonts[i].metrics if i in fonts and used[i] else None,external_fallback=c.get('external_fallback',False))
                    for i, c in enumerate(choices)]
         metadata = dict(font_mix=summary, seed=seed, fallback_characters=fallback,
+                        glyph_fallbacks=fallback_metadata(paths),external_fallback_characters=len(fallback_metadata(paths)),
                         character_fonts=[[token['font'] for token in line] for line in lines])
         if variation: metadata['character_variations'] = character_variations
         return paths, [''.join(t['char'] for t in line) for line in lines], metadata

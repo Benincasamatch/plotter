@@ -1,4 +1,4 @@
-param([switch]$Simulate, [int]$Port = 8080)
+﻿param([switch]$Simulate, [int]$Port = 8080)
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
 $taskPython = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'

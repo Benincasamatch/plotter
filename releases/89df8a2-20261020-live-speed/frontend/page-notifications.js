@@ -30,10 +30,10 @@ window.PageNotifications = class PageNotifications {
     this.toggle.textContent=enabled?'关闭系统提醒':'开启系统提醒';
     this.toggle.disabled=!supported;
     this.test.disabled=!supported||permission!=='granted';
-    this.hint.textContent=message||(!supported?'此浏览器或访问地址不支持系统通知，仍会显示页内完成提示。':
-      permission==='denied'?'通知权限已被拒绝，请在浏览器的网站设置中允许通知；页内提示仍可用。':
-      enabled&&permission==='granted'?'已开启：每页实际完成后提醒一次。请保持网页打开；切到后台可能延迟提醒。':
-      '每写完一页显示完成提示；开启后同时发送系统通知。请保持网页打开。');
+    this.hint.textContent=message||(!supported?'当前浏览器不支持系统通知':
+      permission==='denied'?'通知权限已被拒绝':
+      '');
+    this.hint.hidden=!this.hint.textContent;
   }
   async toggleEnabled(){
     if(this.read().enabled){this.write({...this.read(),enabled:false});this.render();return;}

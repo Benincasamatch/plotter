@@ -21,6 +21,9 @@ from backend.eta import TaskETA
 from backend.font_library import FontLibrary
 from backend.device_profiles import DeviceProfiles
 from backend.font_updates import FontUpdates
+from backend.preview_store import PreviewStore, valid_id
+from backend.presets import Presets
+from backend.watchdog import ControllerWatchdog
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 STATIC = ROOT / 'frontend'
@@ -41,6 +44,7 @@ class Application:
         self.cache = collections.OrderedDict()
         self.groups = collections.OrderedDict()
         self.documents = {}
+        self.previews = PreviewStore(self.jobs_dir)
         # A preview is immutable content; every start mints a new controller
         # execution id so the same page can be written again from a new origin.
         self.executions = collections.OrderedDict()
@@ -58,6 +62,8 @@ class Application:
         self.font_library = FontLibrary(self.fonts)
         self.font_updates = FontUpdates(self.fonts_dir, self.jobs_dir / '.font-analysis', self._publish_fonts)
         self.device_profiles = DeviceProfiles(self.jobs_dir)
+        self.presets = Presets(self.jobs_dir)
+        self.watchdog = ControllerWatchdog(self.machine, self.device_profiles, self.jobs_dir)
 
     def _publish_fonts(self, library):
         # Each request gets an immutable font mapping / library generation.
@@ -65,48 +71,51 @@ class Application:
         self.fonts = library.fonts
 
     def preview(self, data):
-        choices, primary = font_choices(data, self.fonts)
+        library=self.font_library
+        choices, primary = font_choices(data, library.fonts)
+        if choices is None:choices=[dict(font_id=data['font_id'],path=primary,weight=100.)]
         document = 'layout_mode' in data or 'pages' in data
-        results = generate_document(primary, data, choices) if document else [generate(primary, data, choices)]
+        results = generate_document(primary, data, choices, library) if document else [generate(primary, data, choices, library)]
         group_id = uuid.uuid4().hex
         entries, public = [], []
         for result in results:
             job_id = uuid.uuid4().hex
             folder = self.jobs_dir / job_id
             folder.mkdir()
+            result['metadata']['preview_group_id'] = group_id
             # Preserve the exact bytes hashed and previewed, including on Windows.
             (folder / 'job.gcode').write_bytes(result['gcode'].encode('ascii'))
             (folder / 'preview.svg').write_text(result['svg'], encoding='utf8')
             (folder / 'metadata.json').write_text(json.dumps(result['metadata'], ensure_ascii=False, indent=2), encoding='utf8')
             entries.append((job_id, folder, result))
             public.append(dict(job_id=job_id, metadata=result['metadata'], svg=result['svg']))
+        manifest = self.previews.save_group(group_id, [entry[0] for entry in entries],
+                                           results[0]['metadata']['seed'], document)
         with self.lock:
             for job_id, folder, result in entries:
                 self.cache[job_id] = (folder, result)
             self.groups[group_id] = [entry[0] for entry in entries]
             if document:
-                self.documents[group_id] = dict(document_id=group_id, page_count=len(public),
-                                                 job_ids=self.groups[group_id], seed=results[0]['metadata']['seed'])
-            # Evict whole documents: a document with >8 pages stays usable.
-            while len(self.groups) > 8 or (len(self.groups) > 1 and sum(r['metadata']['points'] for f,r in self.cache.values()) > 2000000):
-                expired, ids = self.groups.popitem(last=False)
-                self.documents.pop(expired, None)
-                for job_id in ids: self.cache.pop(job_id, None)
+                self.documents[group_id] = manifest
+            self._trim_cache()
         response = public[0].copy()
         if document:
             response.update(document_id=group_id, page_count=len(public), pages=public)
         return response
 
     def archive(self, document_id):
+        if not valid_id(document_id):
+            raise ValueError('文档编号无效')
         with self.lock:
-            if document_id not in self.documents:
-                raise ValueError('文档预览已过期，请重新生成')
-            manifest = dict(self.documents[document_id])
-            entries = [self.cache[job_id] for job_id in manifest['job_ids']]
+            manifest = self.documents.get(document_id)
+        manifest = dict(manifest or self.previews.group(document_id))
+        if not manifest['document']:
+            raise ValueError('该预览不是多页文档，请单独下载')
         output = io.BytesIO()
         with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
             archive.writestr('manifest.json', json.dumps(manifest, ensure_ascii=False, indent=2))
-            for index, (folder, result) in enumerate(entries):
+            for index, job_id in enumerate(manifest['job_ids']):
+                folder, result = self.job(job_id)
                 prefix = f'page-{index + 1:03d}'
                 archive.writestr(prefix + '.gcode', result['gcode'].encode('ascii'))
                 archive.writestr(prefix + '.svg', result['svg'])
@@ -114,11 +123,34 @@ class Application:
         return output.getvalue()
 
     def job(self, job_id):
-        if not isinstance(job_id, str) or not re.fullmatch(r'[a-f0-9]{32}', job_id):
+        if not valid_id(job_id):
             raise ValueError('任务编号无效')
         with self.lock:
-            if job_id not in self.cache: raise ValueError('预览已过期，请重新生成')
-            return self.cache[job_id]
+            cached = self.cache.get(job_id)
+            if cached is not None:
+                group_id = cached[1]['metadata'].get('preview_group_id', job_id)
+                self.groups.move_to_end(group_id)
+                return cached
+        # No font loading, layout or randomness: recover the exact saved bytes.
+        folder, result = self.previews.job(job_id)
+        group_id = result['metadata'].get('preview_group_id', job_id)
+        with self.lock:
+            self.cache[job_id] = (folder, result)
+            ids = self.groups.setdefault(group_id, [])
+            if job_id not in ids:
+                ids.append(job_id)
+            self.groups.move_to_end(group_id)
+            self._trim_cache()
+            return folder, result
+
+    def _trim_cache(self):
+        # Eviction limits RAM only. Saved pages and their document index remain
+        # available for downloads, origin checks and subsequent page executions.
+        while len(self.groups) > 8 or (len(self.groups) > 1 and sum(r['metadata']['points'] for f,r in self.cache.values()) > 2000000):
+            expired, ids = self.groups.popitem(last=False)
+            self.documents.pop(expired, None)
+            for job_id in ids:
+                self.cache.pop(job_id, None)
 
     def execution_path(self, job_id):
         """G-code for an execution id; previews keep their own file."""
@@ -175,6 +207,9 @@ class Application:
             return self.machine.ports()
         if path == '/api/device-profiles':
             return dict(profiles=self.device_profiles.all()) if data is None else dict(profile=self.device_profiles.save(data))
+        if path == '/api/presets':
+            return dict(groups=self.presets.all() if data is None else self.presets.save(data))
+        if path == '/api/presets/migrate': return self.presets.migrate(data)
         if path == '/api/preview': return self.preview(data)
         if path == '/api/line-pitch':
             # Prediction must not create a job: it only reads font metrics.
@@ -271,11 +306,12 @@ class Handler(BaseHTTPRequestHandler):
                 if path.startswith('/api/documents/') and path.endswith('/archive'):
                     document_id = path[len('/api/documents/'):-len('/archive')]
                     self.respond(200, self.server.app.archive(document_id), 'application/zip', 'writing-pages.zip'); return
-                if path not in ('/api/fonts', '/api/font-status', '/api/font-recommendations', '/api/ports', '/api/state', '/api/device-profiles'): raise KeyError(path)
+                if path not in ('/api/fonts', '/api/font-status', '/api/font-recommendations', '/api/ports', '/api/state', '/api/device-profiles', '/api/presets'): raise KeyError(path)
                 self.respond(200, self.server.app.api(path)); return
             files = {'/': ('index.html', 'text/html'), '/app.js': ('app.js', 'text/javascript'), '/style.css': ('style.css', 'text/css'), '/workbench.css': ('workbench.css', 'text/css')}
             files['/config.js'] = ('config.js', 'text/javascript')
             files['/notebook-sizing.js'] = ('notebook-sizing.js', 'text/javascript')
+            files['/preset-store.js'] = ('preset-store.js', 'text/javascript')
             files['/font-library.js'] = ('font-library.js', 'text/javascript')
             files['/page-notifications.js'] = ('page-notifications.js', 'text/javascript')
             files['/notification-worker.js'] = ('notification-worker.js', 'text/javascript')
@@ -297,7 +333,7 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             if not isinstance(data, dict): raise ValueError('需要 JSON 对象')
             path = urlsplit(self.path).path
-            if path not in ('/api/preview', '/api/line-pitch', '/api/font-refresh', '/api/font-previews', '/api/coordinate-preview', '/api/device-profiles', '/api/connect', '/api/disconnect', '/api/check', '/api/start', '/api/pause', '/api/resume', '/api/speed', '/api/jog', '/api/pen', '/api/manual-pause', '/api/manual-stop', '/api/stop'):
+            if path not in ('/api/presets', '/api/presets/migrate', '/api/preview', '/api/line-pitch', '/api/font-refresh', '/api/font-previews', '/api/coordinate-preview', '/api/device-profiles', '/api/connect', '/api/disconnect', '/api/check', '/api/start', '/api/pause', '/api/resume', '/api/speed', '/api/jog', '/api/pen', '/api/manual-pause', '/api/manual-stop', '/api/stop'):
                 raise KeyError(path)
             self.respond(200, self.server.app.api(path, data))
         except KeyError: self.respond(404, dict(error='接口不存在'))
@@ -341,10 +377,12 @@ def main():
     app = Application(args.font_dir, args.jobs_dir, token, ControllerClient(args.controller_url))
     server = create_server(app, args.host, args.port, args.allow_host, args.allow_origin_port, args.frontend_origin, not args.api_only)
     app.font_updates.start()
+    app.watchdog.start()
     print(f'Plotter backend: http://{args.host}:{server.server_port} | fonts={len(app.fonts)} | controller={args.controller_url}', flush=True)
     try: server.serve_forever()
     except KeyboardInterrupt: pass
     finally:
+        app.watchdog.stop()
         app.font_updates.stop()
         # The independently running controller owns the task lifecycle.
         server.server_close()

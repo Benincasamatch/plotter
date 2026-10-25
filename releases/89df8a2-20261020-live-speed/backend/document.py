@@ -17,6 +17,9 @@ from backend.mathtext import Box, items, render, symbol, SYMBOLS
 from backend.mixing import PUNCTUATION, is_cjk, missing_message, normalized, scoped, scope_shares, script_of
 from backend.wrapping import preferred_space
 from backend.device_profiles import control_settings
+from backend.glyph_fallback import GlyphFallback, Stroke, moved, fallback_metadata
+from backend.font_balance import FontBalance
+from backend import repeat_fonts
 
 
 MAX_PAGES = 100
@@ -62,20 +65,27 @@ def configuration(data, strict=True):
     mode = data.get('layout_mode', 'notebook')
     if mode not in ('notebook', 'grid'):
         raise ValueError('排版模式必须是笔记或表格')
+    smart_balance = data.get('smart_balance', False)
+    if type(smart_balance) is not bool:
+        raise ValueError('智能大小均衡开关必须为布尔值')
+    letter_scale = number(data, 'letter_scale', 100, 50, 150)
+    digit_scale = number(data, 'digit_scale', 100, 50, 150)
+    placement=data.get('line_placement','rows') if mode=='notebook' else 'rows'
+    if placement not in ('rows','ink'):raise ValueError('笔记行布局方式无效')
     base = dict(data)
     sizing = data.get('line_sizing') if mode == 'notebook' else None
     if sizing is not None and sizing not in ('rows', 'size'):
         raise ValueError('笔记排版须选择固定行数或固定字高')
     looseness = number(data, 'line_looseness', 2, 1, 4) if sizing is not None else None
-    # Overlap is a deliberate opt-out: lines keep the requested pitch even when the
-    # ink is taller than the line box, so nothing is scaled down or pushed apart.
+    # Compact prose may cross nominal row boxes; formulas reserve actual ink space.
     allow_overlap = data.get('allow_overlap', False)
     if type(allow_overlap) is not bool:
         raise ValueError('允许字重叠开关必须为布尔值')
-    allow_overlap = allow_overlap and mode == 'notebook' and sizing is not None
+    allow_overlap = allow_overlap and mode == 'notebook' and sizing is not None and placement!='ink'
     if mode == 'grid' or sizing is not None:
         base.pop('rows', None)
-    requested_size = number(data, 'size', 5, 2, 20)
+    # A legacy fixed-row request has no size ratio to retain; its supplied size is derived away.
+    requested_size = 5 if sizing=='rows' and 'latin_size' not in data else number(data, 'size', 5, 2, 20)
     # Grid cells scale every glyph to the cell, so the two heights only differ in notebook mode.
     ratio = (number(data, 'latin_size', requested_size, 2, 20) / requested_size
              if mode == 'notebook' else 1.)
@@ -124,13 +134,14 @@ def configuration(data, strict=True):
     if pagination not in ('auto', 'fixed'):
         raise ValueError('分页方式必须是自动续页或固定每页内容')
     return dict(mode=mode, width=width, height=height, margins=margins, size=size, latin_size=latin_size, rows=rows,
+                smart_balance=smart_balance, letter_scale=letter_scale, digit_scale=digit_scale,
                 pitch=pitch, usable=usable, available=available, grid=grid, pagination=pagination,
-                line_sizing=sizing, line_looseness=looseness, allow_overlap=allow_overlap,
+                line_sizing=sizing, line_looseness=looseness, allow_overlap=allow_overlap,line_placement=placement,
                 punctuation_width=number(data, 'punctuation_width', .8, 0, 2),
                 spacing=number(data, 'spacing', size * .18, 0, 10),
-                feed=number(data, 'feed', 1800, 100, MAX_FEED),
+                feed=number(data, 'feed', 10000, 100, MAX_FEED),
                 device_port=data.get('device_port'), device_control=control_settings(data.get('device_control')),
-                move_feed=number(data, 'move_feed', 3000, 100, MAX_FEED), humanization=human_settings(data))
+                move_feed=number(data, 'move_feed', 10000, 100, MAX_FEED), humanization=human_settings(data))
 
 
 def grid_paths(config):
@@ -180,7 +191,7 @@ def coordinate_preview(data):
     metadata['device_control'] = c['device_control']
     metadata.update(layout_mode=c['mode'], margins=c['margins'], size=c['size'], latin_size=c['latin_size'], rows=c['rows'],
                     line_sizing=c['line_sizing'], line_looseness=c['line_looseness'],
-                    allow_overlap=c['allow_overlap'],
+                    allow_overlap=c['allow_overlap'],line_placement=c['line_placement'],
                     pitch=c['pitch'], grid=c['grid'], humanization=c['humanization'],
                     writable=[c['usable'], c['available']], punctuation_width=c['punctuation_width'])
     return dict(svg=preview_svg(c, coordinates), metadata=metadata)
@@ -194,17 +205,30 @@ class Token:
     fonts: dict = dataclasses.field(default_factory=dict)
     fallback: int = 0
     formula: bool = False
+    balance_scale: float = 1.
+    serial: int | None = None
+    nominal_size: float | None = None
+    display: bool = False
 
 
 class Glyphs:
-    def __init__(self, choices, stack, config, seed):
+    def __init__(self, choices, stack, config, seed, fallback_library=None):
         self.choices = [c for c in normalized(choices) if c['weight'] > 0]
         self.fonts = [stack.enter_context(GFont(c['path'])) for c in self.choices]
-        self.rng = random.Random(seed)
+        self.seed = str(seed)
+        self.font_plan = {}
+        self.token_sequence, self.box_sequence, self.token_id = 0, 0, None
         self.config = config
+        self.balance = FontBalance(self.choices, self.fonts, config)
+        self.last_balance_scale = 1.
         self.variation = Variation(config['humanization'], seed) if active(config['humanization']) else None
+        self.glyph_variation = self.variation
         self.cache = {}
+        self.available={}
         self.used, self.fallback = collections.Counter(), 0
+        self.external_occurrence=0
+        self.resolver=GlyphFallback(fallback_library,choices,stack,GFont) if fallback_library else None
+        self.external_fonts={}
         demo = pathlib.Path(__file__).resolve().parents[1] / 'gcodeFonts' / 'demo.gfont'
         self.latin = stack.enter_context(GFont(demo)) if demo.is_file() else None
 
@@ -214,15 +238,28 @@ class Glyphs:
         return [i for i, c in enumerate(self.choices) if scoped(c['scope'], script)]
 
     def box(self, char, size, varied=False):
+        self.last_balance_scale = 1.
+        self.box_sequence += 1
+        occurrence = f'{self.token_id}:{self.box_sequence}'
         pool = self.pool(char)
         if not pool:
             # No selected font serves this script; never substitute another script's font.
             raise ValueError(missing_message([char], {char: pool}))
-        options = [i for i in pool if ord(char) in self.fonts[i].index]
-        fallback = len(options) < len(pool)
+        if char not in self.available:
+            self.available[char]=[i for i in pool if ord(char) in self.fonts[i].index and any(len(s)>=2 for s in self.fonts[i].glyph(char).strokes())]
+        options=self.available[char]
+        fallback=len(options)<len(pool)
+        replacement=self.resolver.find(char,[self.choices[i]['font_id'] for i in pool]) if not options and self.resolver else None
+        info=None
         if options:
-            index = self.rng.choices(options, weights=[self.choices[i]['weight'] for i in options])[0]
+            rng = random.Random(f'font:{self.seed}:{occurrence}')
+            index = rng.choices(options, weights=[self.choices[i]['weight'] for i in options])[0]
+            selected = self.font_plan.get(occurrence)
+            index = next((i for i in options if self.choices[i]['font_id'] == selected), index)
             font, font_id = self.fonts[index], self.choices[index]['font_id']
+        elif replacement:
+            font,info=replacement
+            font_id=info['font_id'];self.external_fonts[font_id]=(font,info['font'])
         elif self.latin and char.isascii() and ord(char) in self.latin.index:
             font, font_id, fallback = self.latin, 'builtin-latin', True
         else:
@@ -235,7 +272,7 @@ class Glyphs:
                 inner = self.box(SUBSCRIPT[char], size * .62)
                 drop = size * .22
                 return Box(inner.width, inner.height + drop, inner.baseline,
-                           [[(x, y + drop) for x, y in stroke] for stroke in inner.paths])
+                           [moved(stroke,((x,y+drop) for x,y in stroke)) for stroke in inner.paths])
             if char in SYMBOLS:
                 box = symbol(char, size)
             elif equivalent in PUNCT_PATHS:
@@ -246,6 +283,8 @@ class Glyphs:
             self.used['builtin-symbols'] += 1; self.fallback += 1
             return box
         self.used[font_id] += 1; self.fallback += int(fallback)
+        self.last_balance_scale = self.balance.factor(font_id, font, char)
+        size *= self.last_balance_scale
         key = (font_id, char, size)
         if key not in self.cache:
             reference=font.cjk_metrics if self.config['mode']=='notebook' and is_cjk(char) else None
@@ -259,23 +298,36 @@ class Glyphs:
         baseline = size - top
         gap = self.config['spacing']
         if varied and self.variation:
-            value = self.variation.glyph(dict(paths=paths, bounds=(0., width), advance=width + self.config['spacing']), size, self.config['spacing'])
+            value = self.glyph_variation.glyph(dict(paths=paths, bounds=(0., width), advance=width + self.config['spacing']), size, self.config['spacing'])
             paths = value['paths']
             gap = value['variation']['gap']
             points = [p for s in paths for p in s]
             # Keep the original line reference when a glyph moves vertically.
             xs, ys = zip(*points); top, bottom = min(top, min(ys)), max(bottom, max(ys))
             width, baseline = max(xs) - min(xs), size - top
-        return Box(width, bottom - top, baseline, [[(x, y - top) for x, y in s] for s in paths], gap)
+        if info:
+            self.external_occurrence+=1
+            info=dict(info,occurrence=self.external_occurrence)
+        glyph_info = dict(occurrence=occurrence, token=self.token_id, character=char, font_id=font_id, font=font.path.name,
+                          options=[self.choices[i]['font_id'] for i in options] if options else [font_id])
+        return Box(width, bottom - top, baseline,
+                   [Stroke([(x,y-top) for x,y in s],info,glyph_info) for s in paths], gap)
 
-    def token(self, source, formula=False, size=None):
+    def token(self, source, formula=False, size=None, serial=None, display=False):
         # Formulas keep the base height; plain text picks the Chinese or Latin height per character.
         size = (self.config['latin_size'] if not (formula or cjk_character(source)) else self.config['size']) if size is None else size
+        if serial is None:
+            serial = self.token_sequence
+            self.token_sequence += 1
+        self.token_id, self.box_sequence = serial, 0
+        if self.variation:
+            self.glyph_variation = Variation(self.config['humanization'], self.seed + ':token:' + str(serial))
         before, fallback = self.used.copy(), self.fallback
+        self.last_balance_scale = 1.
         if not formula and source.isspace():
             box = Box(size * .5, size, size, [])
         else:
-            box = render(source, size, self.box) if formula else self.box(source, size, varied=True)
+            box = render(source, size, self.box, display=display) if formula else self.box(source, size, varied=True)
         cell = max(box.width, size * self.config['punctuation_width']) if not formula and source in PUNCTUATION else box.width
         # Center punctuation in its reserved space without stretching its ink.
         if cell > box.width:
@@ -289,9 +341,10 @@ class Glyphs:
             cell = box.width
         # Script-only formulas come from HTML <sub>/<sup> in prose: they bind to the preceding
         # glyph, so they must not inherit the formula gap.
-        gap = 0. if formula and source.lstrip()[:1] in ('_', '^') else self.config['spacing']
+        gap = 0. if formula and source.lstrip()[:1] in ('_', '^') else (box.spacing if not formula and box.spacing is not None else self.config['spacing'])
         return Token(('$' + source + '$') if formula else source, box, cell + gap,
-                     dict(self.used - before), self.fallback - fallback, formula)
+                     dict(self.used - before), self.fallback - fallback, formula,
+                     self.last_balance_scale if not formula else 1., serial, size, display)
 
     def summary(self, tokens):
         counts = collections.Counter()
@@ -302,12 +355,15 @@ class Glyphs:
         result = [dict(font_id=c['font_id'], font=c['path'].name, weight=c['weight'], scope=c['scope'],
                        probability=c['weight'] / weight, probabilities=shares[c['font_id']],
                        used=counts[c['font_id']],
-                       actual_probability=counts[c['font_id']] / total if total else 0., metrics=f.metrics)
+                       actual_probability=counts[c['font_id']] / total if total else 0., metrics=f.metrics if counts[c['font_id']] else None)
                   for c, f in zip(self.choices, self.fonts)]
         for font_id, name in [('builtin-latin', '内置单线字母与数字'), ('builtin-symbols', '内置单线数学符号')]:
             if counts[font_id]:
                 result.append(dict(font_id=font_id, font=name, weight=0, probability=0., used=counts[font_id],
                                    actual_probability=counts[font_id] / total, metrics=None))
+        for font_id,(font,name) in self.external_fonts.items():
+            if counts[font_id]:result.append(dict(font_id=font_id,font=name,weight=0,probability=0.,used=counts[font_id],
+                actual_probability=counts[font_id]/total,metrics=font.metrics,external_fallback=True))
         return result
 
 
@@ -339,7 +395,7 @@ def tokenize(text, glyphs, config):
     after_display = False
     for kind, source in items(text):
         if kind != 'text':
-            token = glyphs.token(source, formula=True)
+            token = glyphs.token(source, formula=True, display=kind == 'display')
             if kind == 'display' and result and result[-1] != '\n':
                 result.append('\n')
             result.append(token)
@@ -369,7 +425,7 @@ def drift_limit(config):
 
 
 def plain_line_drift(config):
-    return min(drift_limit(config), max(0., (config['pitch'] - max(config['size'], config['latin_size'])) / 2))
+    return min(drift_limit(config), max(0., (config['pitch'] - max(config['size'], config.get('latin_size',config['size']))) / 2))
 
 
 def ink_shape(font, char):
@@ -590,6 +646,9 @@ def predict_line_pitch(data, choices, loader=GFont):
     no-sizing request report a floor of 1 and keep their own pitch.
     """
     config = configuration(data, strict=False)
+    if config['line_placement']=='ink':
+        return dict(mode=config['mode'],line_sizing=config['line_sizing'],line_placement='ink',ratio=1.,min_ratio=1.,
+                    pitch_mm=config['pitch'],ink_mm=None,feasible=True,drift_mm=0.,allow_overlap=False)
     if config['mode'] != 'notebook' or config['line_sizing'] is None:
         return dict(mode=config['mode'], line_sizing=config['line_sizing'], ratio=1., min_ratio=1.,
                     pitch_mm=config['pitch'], ink_mm=None, feasible=True, drift_mm=0.,
@@ -628,7 +687,7 @@ def prepare_notebook_tokens(tokens, config):
     Overlap mode skips the fit entirely: the user asked for the requested
     heights even where the ink crosses the line box.
     """
-    if config.get('line_sizing') is None or config.get('allow_overlap'):
+    if config.get('line_sizing') is None or config.get('allow_overlap') or config.get('line_placement')=='ink':
         return tokens
     budget=config['pitch']-2*plain_line_drift(config)
     plain=[t for t in tokens if t!='\n' and not t.formula]
@@ -701,8 +760,64 @@ def notebook_rows(tokens, config):
     return rows
 
 
+def compact_notebook_pages(rows, config, glyphs, protect_text=False):
+    """Keep the requested base pitch and reserve actual ink space with sub-row precision."""
+    pages=[];paths=[];lines=[];page_tokens=[];guides=[];layout=[]
+    pitch=config['pitch'];available=config['available'];m=config['margins']
+    gap=max(.25,min(.6,min(config['size'],config['latin_size'])*.08))
+    next_y=0.;ink_bottom=None;formula_bottom=None;last_formula=False
+
+    def flush():
+        nonlocal paths,lines,page_tokens,guides,layout,next_y,ink_bottom,formula_bottom,last_formula
+        pages.append((paths,lines,page_tokens,guides,layout))
+        paths=[];lines=[];page_tokens=[];guides=[];layout=[]
+        next_y=0.;ink_bottom=None;formula_bottom=None;last_formula=False
+
+    for line in rows:
+        formula=any(t.formula for t in line)
+        baseline=max((t.box.baseline for t in line),default=max(config['size'],config['latin_size']))
+        drift_amplitude=(glyphs.variation.amplitude('baseline') if formula and glyphs.variation else plain_line_drift(config))
+        phase=glyphs.variation.line_phase() if glyphs.variation else 0.
+        x=m['left'];relative=[]
+        for token in line:
+            drift=drift_amplitude*math.sin(phase+math.pi*(x-m['left'])/config['usable'])
+            relative.extend(token.box.placed(x,baseline-token.box.baseline+drift+drift_amplitude))
+            x+=token.advance
+        points=[p for stroke in relative for p in stroke]
+        top=min((y for _,y in points),default=0.)
+        bottom=max((y for _,y in points),default=0.)
+        if bottom-top>available+.001:
+            raise ValueError('公式或字形高度超过单页可写范围，请减小字号或增加页面高度')
+        y=next_y-top if protect_text and ink_bottom is None and points else next_y
+        safe_gap=gap if formula or last_formula or not protect_text else max(.15,min(.35,min(config['size'],config['latin_size'])*.04))
+        protected=ink_bottom if formula or protect_text else formula_bottom
+        if protected is not None:y=max(y,protected+safe_gap-top)
+        # Empty source rows still consume one pitch; their nominal baseline must fit.
+        edge=bottom if points else min(pitch,max(config['size'],config['latin_size']))
+        if lines and y+edge>available+.001:
+            flush();y=-top if protect_text and points else 0.
+        y=max(y,-top)
+        if y+edge>available+.001:
+            raise ValueError('公式或字形高度超过单页可写范围，请减小字号或增加页面高度')
+        extra=max(0.,y-next_y)
+        placed=[moved(s,((px,py+y+m['top']) for px,py in s)) for s in relative]
+        paths.extend(placed);lines.append(''.join(t.source for t in line));page_tokens.extend(line)
+        guides.append(round(m['top']+y+(bottom if points else baseline),3))
+        layout.append(dict(formula=formula,offset_mm=round(y,4),top_mm=round(m['top']+y+top,4),
+                           bottom_mm=round(m['top']+y+bottom,4),extra_gap_mm=round(extra,4),safety_gap_mm=safe_gap))
+        if points:
+            ink_bottom=max(ink_bottom if ink_bottom is not None else -math.inf,y+bottom)
+            if formula:formula_bottom=max(formula_bottom if formula_bottom is not None else -math.inf,y+bottom)
+        next_y=y+pitch
+        last_formula=formula
+    if lines or not pages:flush()
+    return pages
+
+
 def notebook_pages(tokens, config, glyphs):
     rows = notebook_rows(tokens, config)
+    if config.get('line_placement')=='ink':return compact_notebook_pages(rows,config,glyphs,protect_text=True)
+    if config['allow_overlap']:return compact_notebook_pages(rows,config,glyphs)
     pages, paths, page_tokens, lines = [], [], [], []
     def default_guides():
         return {i: round(config['margins']['top'] + i * config['pitch'] + max(config['size'], config['latin_size']), 3) for i in range(config['rows'])}
@@ -716,22 +831,12 @@ def notebook_pages(tokens, config, glyphs):
         if config['line_sizing'] is not None and not any(t.formula for t in line):
             drift_amplitude=plain_line_drift(config)
         height += 2 * drift_amplitude
-        if config['allow_overlap']:
-            # One source line per row: neighbouring lines may share ink, but the
-            # last line still must not reach past the writable bottom.
-            slots = 1
-            if height > config['available'] + .001:
-                raise ValueError('公式或字形高度超过单页可写范围，请减小字号或增加页面高度')
-            if row_cursor and row_cursor * config['pitch'] + height > config['available'] + .001:
-                pages.append((paths, lines, page_tokens, list(guides.values()))); paths, lines, page_tokens, row_cursor = [], [], [], 0
-                guides = default_guides()
-        else:
-            slots = max(1, math.ceil((height - .0001) / config['pitch']))
-            if slots > config['rows'] or height > config['available'] + .001:
-                raise ValueError('公式或字形高度超过单页可写范围，请减小字号或增加页面高度')
-            if row_cursor + slots > config['rows']:
-                pages.append((paths, lines, page_tokens, list(guides.values()))); paths, lines, page_tokens, row_cursor = [], [], [], 0
-                guides = default_guides()
+        slots = max(1, math.ceil((height - .0001) / config['pitch']))
+        if slots > config['rows'] or height > config['available'] + .001:
+            raise ValueError('公式或字形高度超过单页可写范围，请减小字号或增加页面高度')
+        if row_cursor + slots > config['rows']:
+            pages.append((paths, lines, page_tokens, list(guides.values()))); paths, lines, page_tokens, row_cursor = [], [], [], 0
+            guides = default_guides()
         x, y = config['margins']['left'], config['margins']['top'] + row_cursor * config['pitch']
         phase = glyphs.variation.line_phase() if glyphs.variation else 0.
         # Smooth line drift gets reserved space instead of crossing page margins.
@@ -777,7 +882,11 @@ def character_grid_pages(tokens, config):
             if span > g['columns']:
                 raise ValueError('公式超过一整行格子宽度，请拆分公式或增加列数')
         else:
-            scale = min(scale, aw / max(token.box.width, .001))
+            # Fit to the original cell occupancy before balancing. Otherwise the
+            # usual fill-to-height step would undo a smaller Latin glyph.
+            factor = token.balance_scale
+            scale = min(scale * factor, ah / max(token.box.height, .001),
+                        aw * min(1., factor) / max(token.box.width, .001))
         if col + span > g['columns']:
             next_row()
             if row >= config['rows']: next_page()
@@ -792,11 +901,68 @@ def character_grid_pages(tokens, config):
     return pages
 
 
-def emit(config, data, paper_paths, lines, tokens, glyphs, seed, source_page, row_guides=None):
+def distributed_pages(tokens, config, glyphs):
+    """Reflow real glyphs after spatial selection, checking actual output pages.
+
+    Width/height changes can move a glyph to a new page. Retain the best valid
+    measured layout; if page membership oscillates before diversity is satisfied,
+    keep those page boundaries and allow further splits, never a silent violation.
+    """
+    def layout(chunk):
+        return notebook_pages(chunk, config, glyphs) if config['mode'] == 'notebook' else character_grid_pages(chunk, config)
+    line_state = glyphs.variation.line_rng.getstate() if glyphs.variation else None
+    best, best_score, best_state = None, None, None
+    barriers = set()
+    current = tokens
+    weights = {choice['font_id']: choice['weight'] for choice in glyphs.choices}
+    for attempt in range(MAX_PAGES + 8):
+        if glyphs.variation:
+            glyphs.variation.line_rng.setstate(line_state)
+        chunks, chunk = [], []
+        for token in current:
+            if token != '\n' and token.serial in barriers and chunk:
+                chunks.append(chunk); chunk = []
+            chunk.append(token)
+        chunks.append(chunk)
+        try:
+            pages = [page for chunk in chunks for page in layout(chunk)]
+        except ValueError:
+            if best is None:
+                raise
+            if glyphs.variation:
+                glyphs.variation.line_rng.setstate(best_state)
+            return best
+        if len(pages) > MAX_PAGES:
+            raise ValueError('排版结果超过 100 页，请拆分文档')
+        score = repeat_fonts.quality(pages)
+        if score[0] == 0 and (best_score is None or score > best_score):
+            best, best_score = pages, score
+            best_state = glyphs.variation.line_rng.getstate() if glyphs.variation else None
+        plan = repeat_fonts.plan_pages(pages, weights, glyphs.seed)
+        placed = {item['occurrence']: item['font_id'] for page in pages for item in repeat_fonts.occurrences(page[0])}
+        if all(placed.get(key) == font for key, font in plan.items()) and score[0] == 0:
+            if best_score is not None and best_score > score:
+                if glyphs.variation:
+                    glyphs.variation.line_rng.setstate(best_state)
+                return best
+            return pages
+        if attempt >= 4 and best is not None:
+            if glyphs.variation:
+                glyphs.variation.line_rng.setstate(best_state)
+            return best
+        if attempt >= 6:
+            barriers.update(page[2][0].serial for page in pages[1:] if page[2])
+        glyphs.font_plan = plan
+        current = [token if token == '\n' else glyphs.token(token.source[1:-1] if token.formula else token.source,
+                   formula=token.formula, size=token.nominal_size, serial=token.serial, display=token.display) for token in tokens]
+    raise ValueError('字体变化导致分页无法稳定，请减小字号或增大可写区域后重试')
+
+
+def emit(config, data, paper_paths, lines, tokens, glyphs, seed, source_page, row_guides=None, line_layout=None):
     coordinates = Coordinates.from_data(data, config['width'], config['height'])
     if config['mode'] == 'grid' and config['grid']['draw_lines']:
         paper_paths = grid_paths(config) + paper_paths
-    paper_paths = [[(round(x, 3), round(y, 3)) for x, y in stroke] for stroke in paper_paths]
+    paper_paths = [moved(stroke,((round(x,3),round(y,3)) for x,y in stroke)) for stroke in paper_paths]
     points = [p for s in paper_paths for p in s]
     if len(points) > 200000:
         raise ValueError('单页路径超过 20 万点，请减少单页内容')
@@ -830,18 +996,22 @@ def emit(config, data, paper_paths, lines, tokens, glyphs, seed, source_page, ro
         metadata['device_port'] = config['device_port']
     metadata.update(layout_mode=config['mode'], margins=config['margins'], writable=[config['usable'], config['available']],
                     line_sizing=config['line_sizing'], line_looseness=config['line_looseness'],
-                    allow_overlap=config['allow_overlap'], row_guides=row_guides,
+                    allow_overlap=config['allow_overlap'],line_placement=config['line_placement'], row_guides=row_guides,line_layout=line_layout,
                     rows=config['rows'], size=config['size'], latin_size=config['latin_size'], pitch=config['pitch'], spacing=config['spacing'], feed=config['feed'], move_feed=config['move_feed'],
                     grid=config['grid'], punctuation_width=config['punctuation_width'], humanization=config['humanization'],
                     seed=seed, source_page=source_page, lines=lines, text='\n'.join(lines), bounds=bounds, machine_bounds=machine_bounds,
                     strokes=len(paths), points=len(points), commands=len(commands), xy_mm=round(travel + draw + math.dist(last,(0,0)), 1),
                     font_mix=glyphs.summary(tokens), fallback_characters=sum(t.fallback for t in tokens),
+                    font_balance=glyphs.balance.metadata({key for token in tokens for key in token.fonts}),
+                    glyph_occurrences=repeat_fonts.occurrences(paper_paths),
+                    repeat_distribution=repeat_fonts.metadata(paper_paths),
+                    glyph_fallbacks=fallback_metadata(paper_paths),external_fallback_characters=len(fallback_metadata(paper_paths)),
                     empty=not bool(points), formula_count=sum(t.formula for t in tokens),
                     sha256=hashlib.sha256(gcode.encode('ascii')).hexdigest())
     return dict(metadata=metadata, paths=paths, gcode=gcode, svg=preview_svg(config, coordinates, paper_paths, row_guides))
 
 
-def generate_document(font_path, data, choices=None):
+def generate_document(font_path, data, choices=None, fallback_library=None):
     config = configuration(data)
     raw_pages = data.get('pages', [dict(text=data.get('text', ''))])
     if not isinstance(raw_pages, list) or not 1 <= len(raw_pages) <= MAX_PAGES:
@@ -865,21 +1035,20 @@ def generate_document(font_path, data, choices=None):
     choices = choices or [dict(font_id='primary', path=pathlib.Path(font_path), weight=100.)]
     results, point_count = [], 0
     with contextlib.ExitStack() as stack:
-        glyphs = Glyphs(choices, stack, config, seed)
+        glyphs = Glyphs(choices, stack, config, seed, fallback_library)
         for index, text in enumerate(pages):
             sections = re.split(r'\f|\\(?:newpage|pagebreak)\b', text)
             for section in sections:
                 if data.get('input_format') == 'markdown': section = markdown_text(section)
                 tokens = tokenize(section.expandtabs(4), glyphs, config)
-                generated = (notebook_pages(tokens, config, glyphs) if config['mode'] == 'notebook'
-                             else character_grid_pages(tokens, config))
+                generated = distributed_pages(tokens, config, glyphs)
                 if config['pagination'] == 'fixed' and len(generated) > 1:
                     raise ValueError(f'预设第 {index + 1} 页内容溢出，需要 {len(generated)} 页；请减少内容或选择自动续页')
                 for entry in generated:
                     paths, lines, page_tokens = entry[:3]
                     if len(results) >= MAX_PAGES:
                         raise ValueError('排版结果超过 100 页，请拆分文档')
-                    result = emit(config, data, paths, lines, page_tokens, glyphs, seed, index + 1, entry[3] if len(entry) > 3 else None)
+                    result = emit(config, data, paths, lines, page_tokens, glyphs, seed, index + 1, entry[3] if len(entry) > 3 else None,entry[4] if len(entry)>4 else None)
                     point_count += result['metadata']['points']
                     if point_count > 2000000:
                         raise ValueError('文档路径超过 200 万点，请拆分文档')
